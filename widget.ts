@@ -13,10 +13,10 @@
  */
 
 import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
-import type { WidgetResult, WidgetRow, WidgetStatus } from "@everyx/pi-ui/widget.js";
-import { StatusWidget } from "@everyx/pi-ui/widget.js";
 import type { AgentProcess } from "./agent-process.js";
 import type { AgentActivity } from "./event-interpret.js";
+import type { WidgetResult, WidgetRow, WidgetStatus } from "./ui/widget.js";
+import { StatusWidget } from "./ui/widget.js";
 import { agentTitle } from "./views.js";
 
 export class AgentWidget {

@@ -4,7 +4,7 @@
 
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { ticker } from "../ticker.js";
+import { ticker } from "../../ui/ticker.js";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 

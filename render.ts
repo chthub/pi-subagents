@@ -7,10 +7,10 @@
  */
 
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { type CardIcon, type Component, errorIcon, stoppedIcon, successIcon } from "@everyx/pi-ui/card.js";
-import { formatDuration } from "@everyx/pi-ui/spinner.js";
 import { type CardBody, renderNoDetailsCard, renderNotificationCard } from "./card.js";
 import type { NotificationDetails } from "./types.js";
+import { type CardIcon, type Component, errorIcon, stoppedIcon, successIcon } from "./ui/card.js";
+import { formatDuration } from "./ui/spinner.js";
 
 function formatTokens(n: number): string {
 	return n.toLocaleString("en-US");

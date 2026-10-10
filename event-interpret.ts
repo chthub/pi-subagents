@@ -19,8 +19,8 @@
  * arrive off the wire. AgentProcess.onEvent is a thin switch over the result.
  */
 
-import type { WidgetResult } from "@everyx/pi-ui/widget.js";
 import type { AgentMessage, RpcEvent } from "./protocol.js";
+import type { WidgetResult } from "./ui/widget.js";
 
 /**
  * One unit of sub-agent activity — thinking, streamed text, or a tool call.

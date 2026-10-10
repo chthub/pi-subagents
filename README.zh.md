@@ -1,6 +1,8 @@
-# pi-subagent
+# pi-subagents
 
 [English](README.md) | [中文](README.zh.md)
+
+> 派生自 [`@everyx/pi-subagent`](https://github.com/everyx/pi-extensions/tree/master/packages/pi-subagent) 1.3.7（everyx/pi-extensions@3b455f1，MIT）。原来依赖的 `@everyx/pi-ui` 已内联到 `ui/`，除 pi 本身外没有运行时依赖。目标版本 pi 1.1.0。
 
 **Pi 的协作式子代理——三原语、有名有姓、互通消息，调度权在你。**
 
@@ -50,18 +52,14 @@ pi-subagent 与 [`@tintinweb/pi-subagents`](https://github.com/tintinweb/pi-suba
 ## 安装
 
 ```bash
-# npm（推荐）
-pi install npm:@everyx/pi-subagent
+# 本地目录（开发）
+pi install /path/to/pi-subagents
 
 # git
-pi install git:github.com/everyx/pi-subagent
+pi install git:github.com/chthub/pi-subagents
 ```
 
-开发期软链接：
-
-```bash
-ln -sf /path/to/pi-extensions/packages/pi-subagent ~/.pi/agent/extensions/subagent
-```
+只在一次会话里试用：`pi -e /path/to/pi-subagents/index.ts`。
 
 重启 pi 后直接说"让子 agent 去…"。
 

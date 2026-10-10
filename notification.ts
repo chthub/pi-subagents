@@ -10,10 +10,10 @@
  */
 
 import { type ExtensionAPI, truncateTail } from "@earendil-works/pi-coding-agent";
-import { stashOverflow, truncationMarker } from "@everyx/pi-ui/context.js";
 import type { AgentCompletion } from "./agent-process.js";
 import type { RegisteredAgent } from "./registry.js";
 import type { NotificationDetails } from "./types.js";
+import { stashOverflow, truncationMarker } from "./ui/context.js";
 import { agentTitle } from "./views.js";
 
 /**

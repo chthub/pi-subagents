@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { initTheme } from "@earendil-works/pi-coding-agent";
-import { dataCard } from "../card.js";
-import { ticker } from "../ticker.js";
-import { createToolView } from "../view.js";
+import { dataCard } from "../../ui/card.js";
+import { ticker } from "../../ui/ticker.js";
+import { createToolView } from "../../ui/view.js";
 
 initTheme("light");
 

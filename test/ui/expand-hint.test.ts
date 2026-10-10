@@ -11,7 +11,7 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 import { getKeybindings, KeybindingsManager, setKeybindings, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
-import { expandHintText } from "../view.js";
+import { expandHintText } from "../../ui/view.js";
 
 function withExpandBinding() {
 	const original = getKeybindings();

@@ -1,6 +1,8 @@
-# pi-subagent
+# pi-subagents
 
 [English](README.md) | [中文](README.zh.md)
+
+> Derived from [`@everyx/pi-subagent`](https://github.com/everyx/pi-extensions/tree/master/packages/pi-subagent) 1.3.7 (everyx/pi-extensions@3b455f1, MIT). The `@everyx/pi-ui` modules it used are inlined under `ui/`, so this package has no runtime dependency besides pi itself. Targets pi 1.1.0.
 
 **Pi agents that work together — three primitives, a tree of named agents, no noise.**
 
@@ -50,18 +52,14 @@ pi-subagent, [`@tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagen
 ## Install
 
 ```bash
-# npm (recommended)
-pi install npm:@everyx/pi-subagent
+# local checkout (development)
+pi install /path/to/pi-subagents
 
 # git
-pi install git:github.com/everyx/pi-subagent
+pi install git:github.com/chthub/pi-subagents
 ```
 
-Or symlink for development:
-
-```bash
-ln -sf /path/to/pi-extensions/packages/pi-subagent ~/.pi/agent/extensions/subagent
-```
+Or try it for one session: `pi -e /path/to/pi-subagents/index.ts`.
 
 Restart pi, then tell it "ask a sub‑agent to…".
 

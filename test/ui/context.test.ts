@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { describe, it } from "node:test";
-import { stashOverflow, truncationMarker } from "../context.js";
+import { stashOverflow, truncationMarker } from "../../ui/context.js";
 
 describe("stashOverflow", () => {
 	it("keeps the head by default and stashes the full text", () => {

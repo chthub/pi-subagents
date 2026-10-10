@@ -15,15 +15,9 @@
  */
 
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import {
-	type BodyComponent,
-	type CardConfig,
-	cardShell,
-	contentRow,
-	renderCard as renderCardUi,
-} from "@everyx/pi-ui/card.js";
+import { type BodyComponent, type CardConfig, cardShell, contentRow, renderCard as renderCardUi } from "./ui/card.js";
 
-export type { CardBody } from "@everyx/pi-ui/card.js";
+export type { CardBody } from "./ui/card.js";
 
 /** Notification card: the shared card grammar inside the message shell. */
 export function renderNotificationCard(config: CardConfig, theme: Theme): BodyComponent {

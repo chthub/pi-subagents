@@ -5,8 +5,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { renderHeader } from "../card.js";
-import { clipTail, formatDuration, Spinner, safeTitle } from "../spinner.js";
+import { renderHeader } from "../../ui/card.js";
+import { clipTail, formatDuration, Spinner, safeTitle } from "../../ui/spinner.js";
 
 describe("spinner", () => {
 	it("returns a frame immediately and stays within the frame set", () => {

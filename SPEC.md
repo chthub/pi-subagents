@@ -1,6 +1,6 @@
 # pi-subagent 规格说明
 
-> 通用设计原则（Pi Native / LLM+Token Friendly / 提供能力 / 极简克制）与统一视觉语法见项目级 [`SPEC.md`](../../SPEC.md)；本文件只记录 sub-agent 专属设计。
+> 通用设计原则（Pi Native / LLM+Token Friendly / 提供能力 / 极简克制）与统一视觉语法见项目级 [`docs/upstream/root-SPEC.md`](docs/upstream/root-SPEC.md)；本文件只记录 sub-agent 专属设计。
 
 ## 问题陈述
 

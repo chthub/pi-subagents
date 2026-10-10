@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { Spinner } from "../spinner.js";
+import { Spinner } from "../../ui/spinner.js";
 import {
 	counterParts,
 	EXCERPT_INDENT,
@@ -14,7 +14,7 @@ import {
 	StatusWidget,
 	type WidgetItem,
 	type WidgetRow,
-} from "../widget.js";
+} from "../../ui/widget.js";
 
 /** Captures the widget's render function through a mock ui.setWidget. */
 function capture(ui: { setWidget: ExtensionUIContext["setWidget"] }) {

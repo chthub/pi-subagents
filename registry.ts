@@ -20,10 +20,10 @@
  * complete() unifies both to notify → cleanup — no observable difference.
  */
 
-import type { WidgetResult } from "@everyx/pi-ui/widget.js";
 import type { AgentCompletion } from "./agent-process.js";
 import { randomAgentName } from "./name-gen.js";
 import { type AgentMessage, type RouteDecision, routeMessage } from "./protocol.js";
+import type { WidgetResult } from "./ui/widget.js";
 
 /** Narrow agent surface the registry needs — AgentProcess satisfies it. */
 export interface RegisteredAgent {

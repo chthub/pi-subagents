@@ -13,12 +13,12 @@
  */
 
 import { initTheme, type Theme } from "@earendil-works/pi-coding-agent";
-import { createPreviewRuntime } from "@everyx/pi-ui/preview-runtime.js";
-import type { WidgetResult } from "@everyx/pi-ui/widget.js";
 import type { AgentProcess } from "./agent-process.js";
 import type { AgentActivity } from "./event-interpret.js";
 import { renderNotification } from "./render.js";
 import type { RenderEvent, SubagentDetails } from "./types.js";
+import { createPreviewRuntime } from "./ui/preview-runtime.js";
+import type { WidgetResult } from "./ui/widget.js";
 import { sendView, spawnView, stopView } from "./views.js";
 import { AgentWidget } from "./widget.js";
 

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { capPlain, structRow } from "../width.js";
+import { capPlain, structRow } from "../../ui/width.js";
 
 describe("capPlain", () => {
 	it("keeps short text as-is", () => {

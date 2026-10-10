@@ -8,10 +8,10 @@
  * Pure rendering: no pi API, no registry — only the ToolRenderContext shape.
  */
 
-import { durationMeta } from "@everyx/pi-ui/spinner.js";
-import { createToolView } from "@everyx/pi-ui/view.js";
-import { counterParts } from "@everyx/pi-ui/widget.js";
 import type { SubagentDetails } from "./types.js";
+import { durationMeta } from "./ui/spinner.js";
+import { createToolView } from "./ui/view.js";
+import { counterParts } from "./ui/widget.js";
 
 /** Add "@" exactly once — ids may already carry it ("@parent", "@max").
  * Display layers must go through this so the literal @-form never doubles
