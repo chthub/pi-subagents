@@ -18,7 +18,10 @@
  *   views.ts          — tool card views (single source for the three cards)
  *   card.ts           — notification card wrappers (via pi-ui)
  *   render.ts         — notification card renderer (message surface)
- *   widget.ts         — Agents status widget
+ *   widget.ts         — bottom agent list (one clickable line per agent)
+ *   roster.ts         — the conversation's agents, live and finished (rebuilt on resume)
+ *   agent-view.ts     — full-screen view of one agent: transcript + side-chat editor
+ *   transcript.ts     — child conversation rendered with pi's own components
  *
  * Every sub‑agent is a resident `pi --mode rpc` child with a persisted
  * session. Foreground agent_spawn calls block until completion; background
@@ -32,9 +35,17 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import {
+	buildSessionContext,
+	type ExtensionAPI,
+	type ExtensionContext,
+	type ExtensionUIContext,
+	SessionManager,
+	type ToolRenderers,
+} from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { AgentProcess } from "./agent-process.js";
+import { AgentView } from "./agent-view.js";
 import { type AgentActivity, type AgentTreeEvent, MSG_STATUS_KEY, TREE_STATUS_KEY } from "./event-interpret.js";
 import { createLiveChannels } from "./live-output.js";
 import { resolveModel } from "./model.js";
@@ -42,7 +53,9 @@ import { maybeWriteFullOutput, notifyCompletion, truncateForContext } from "./no
 import { type AgentMessage, formatFrom } from "./protocol.js";
 import { AgentRegistry, type WidgetSurface } from "./registry.js";
 import { renderNotification } from "./render.js";
+import { Roster, rosterFromMessages } from "./roster.js";
 import { runSpawnSession, type SpawnOutcome } from "./spawn-session.js";
+import { fallbackRenderers } from "./transcript.js";
 import { createSubtreeDisplay } from "./tree-display.js";
 import type { SubagentDetails } from "./types.js";
 import { atId, sendView, spawnView, stopView } from "./views.js";
@@ -78,8 +91,20 @@ const MY_AGENT_ID = process.env.PI_SUBAGENT_AGENT_ID ?? "";
 /** I am a child agent when an identity was injected (root children get "a1"…). */
 const HAS_PARENT = MY_AGENT_ID !== "";
 
-/** TUI-only background-agent status widget (created lazily, tui mode only). */
+/** Every sub-agent of this conversation, live or finished. */
+const roster = new Roster();
+
+/** Live child processes by agent id (foreground, background, resident, revived). */
+const processes = new Map<string, AgentProcess>();
+
+/** TUI-only bottom agent list (created lazily, tui mode only). */
 let widget: AgentWidget | null = null;
+
+/** Opens the agent view; wired inside the extension entry (needs the registry). */
+let openAgent: (agentId: string) => void = () => {};
+
+/** The TUI handle the agent view opens on (refreshed on session start and by commands). */
+let viewUi: ExtensionUIContext | undefined;
 
 /**
  * Lazily-captured UI handle for the child→parent channel (extension_ui_request /
@@ -93,8 +118,8 @@ function ensureWidget(ctx: { mode: string; ui: unknown }): AgentWidget | null {
 	captureUi(ctx);
 	if (widget) return widget;
 	if (ctx.mode !== "tui") return null;
-	// biome-ignore lint/suspicious/noExplicitAny: ExtensionUIContext shape from pi
-	widget = new AgentWidget(ctx.ui as any);
+	viewUi = ctx.ui as ExtensionUIContext;
+	widget = new AgentWidget(viewUi, roster, (agentId) => openAgent(agentId));
 	return widget;
 }
 
@@ -259,11 +284,12 @@ export function buildSpawnParamsSchema(hasParent: boolean): ReturnType<typeof Ty
 		timeoutMs: SpawnTimeoutField,
 		persistent: Type.Optional(
 			Type.Boolean({
-				description:
-					"If true, keep the agent resident after it completes (idle, zero token) so you can " +
-					"send it follow-up messages later — the process stays alive until your session ends " +
-					"(a sub-agent's residents are cleaned up when it returns) or until you stop it. " +
-					"Default false (the agent exits when done).",
+				description: hasParent
+					? "If true, keep the agent resident after it completes (idle, zero token) so follow-up " +
+						"messages skip the restart — it is cleaned up when you return. Default false."
+					: "Keep the agent resident after it completes (idle, zero token) so follow-up messages " +
+						"skip the restart. Default true; false exits it when done (agent_send still resumes " +
+						"it from its session).",
 			}),
 		),
 		...(hasParent
@@ -272,9 +298,9 @@ export function buildSpawnParamsSchema(hasParent: boolean): ReturnType<typeof Ty
 					run_in_background: Type.Optional(
 						Type.Boolean({
 							description:
-								"If true, return an agent_id immediately and notify you on completion — you can " +
-								"keep working meanwhile. If false (default), block until the result is ready. " +
-								"Root-only: as a sub-agent you cannot host background work.",
+								"Default true: return an agent id immediately; the completion notification " +
+								"carries the result. Set false to block until the result is ready — only when you " +
+								"cannot do anything useful before it arrives.",
 						}),
 					),
 				}),
@@ -378,9 +404,36 @@ async function handleMessage(
 	}
 }
 
+/**
+ * Appended to every spawn prompt: the child may not load this extension, so
+ * the "ask by stopping" contract travels with the task itself. The parent
+ * answers with agent_send, which resumes the child with its context.
+ */
+const CHILD_PROMPT_NOTE =
+	"\n\n(If you are blocked on missing information or a decision, stop and end your reply with the question. " +
+	"The answer will resume you with this context.)";
+
+/** The tools subagent_enable activates (registered with defaultActive: false). */
+const SUBAGENT_TOOL_NAMES = ["agent_spawn", "agent_stop", "agent_send"] as const;
+const ENABLE_TOOL_NAME = "subagent_enable";
+
+/** Whether the transcript's last word on the agent tools is "added" — i.e. the
+ *  conversation had enabled them. */
+function transcriptEnabledAgentTools(ctx: ExtensionContext): boolean {
+	let enabled = false;
+	for (const message of buildSessionContext(ctx.sessionManager.getBranch()).messages) {
+		if (message.role !== "system") continue;
+		const m = message as { toolsAdded?: { name: string }[]; toolsRemoved?: { name: string }[] };
+		if (m.toolsRemoved?.some((t) => t.name === "agent_spawn")) enabled = false;
+		if (m.toolsAdded?.some((t) => t.name === "agent_spawn")) enabled = true;
+	}
+	return enabled;
+}
+
 // ─── Default export (pi extension entry) ───────────────────────
 
 export default function (pi: ExtensionAPI) {
+
 	// pi's agent-core drops the execute() isError flag when a tool returns
 	// normally (bash gets its error background by throwing instead) — see
 	// agent-core executePreparedToolCall. Re-attach it for our tools by
@@ -417,20 +470,70 @@ export default function (pi: ExtensionAPI) {
 	// executes (a background child reports activity long after its execute returned).
 	const tree = createTreeTelemetry(HAS_PARENT);
 
+	/** A wake turn ended: deliver its answer to this session, like a completion. */
+	const reportWake = async (agent: AgentProcess, status: "completed" | "failed"): Promise<void> => {
+		const [output, stats] = await Promise.all([agent.lastOutput(), agent.getStats()]);
+		notifyCompletion(pi, agent, {
+			status,
+			output: output || (status === "failed" ? "Follow-up turn failed (model API error)." : output),
+			stats: {
+				tokens: stats?.tokens ?? 0,
+				toolUses: stats?.toolUses ?? 0,
+				durationMs: Date.now() - agent.startedAt,
+			},
+			sessionPath: agent.sessionPath,
+			sessionId: agent.sessionId,
+		});
+	};
+
+	// ── subagent_enable ─────────────────────────────────
+	// The three agent tools are registered inactive so a conversation that
+	// never delegates carries no schema or guidelines for them; this
+	// parameterless loader activates them on demand (same pattern as
+	// web_enable / session_hub_enable). The activation is recorded in the
+	// transcript, so a resumed session keeps the tools.
+	pi.registerTool({
+		name: ENABLE_TOOL_NAME,
+		label: "Enable Sub-agents",
+		description:
+			"Enable the sub-agent tools (agent_spawn, agent_stop, agent_send). Does not spawn anything. " +
+			"Enabled tools are available on the next model request.",
+		promptSnippet: HAS_PARENT
+			? "Call subagent_enable before delegating work to sub-agents of your own"
+			: "Call subagent_enable when the user asks for sub-agents, or a task would flood your context with verbose output or splits into independent parallel parts",
+		parameters: Type.Object({}, { additionalProperties: false }),
+		async execute() {
+			const registered = new Set(pi.getAllTools().map((tool) => tool.name));
+			const unavailable = SUBAGENT_TOOL_NAMES.filter((name) => !registered.has(name));
+			if (unavailable.length > 0) throw new Error(`Cannot enable unavailable tools: ${unavailable.join(", ")}.`);
+			pi.setActiveTools([...new Set([...pi.getActiveTools(), ...SUBAGENT_TOOL_NAMES])]);
+			const active = new Set(pi.getActiveTools());
+			const missing = SUBAGENT_TOOL_NAMES.filter((name) => !active.has(name));
+			if (missing.length > 0) throw new Error(`Tools still inactive after activation: ${missing.join(", ")}.`);
+			return {
+				content: [
+					{ type: "text", text: `Enabled: ${SUBAGENT_TOOL_NAMES.join(", ")}. Available on the next model request.` },
+				],
+				details: { enabled: [...SUBAGENT_TOOL_NAMES] },
+			};
+		},
+	});
+
 	// ── agent_spawn ────────────────────────────────────
 	pi.registerTool({
 		name: "agent_spawn",
 		label: "Agent Spawn",
+		defaultActive: false,
 		description: HAS_PARENT
 			? "Spawn an isolated sub-agent in your own context window. The call blocks until it " +
 				"finishes and returns the output. Background spawns are root-only — your lifetime " +
 				"ends when this call returns; persistent helpers are fine and live as long as you do."
-			: "Spawn an isolated sub-agent in its own context window. Foreground (run_in_background: " +
-				"false) blocks until it finishes and returns the output directly. Background " +
-				"(run_in_background: true) returns an agent id immediately; the completion notification " +
+			: "Spawn an isolated sub-agent in its own context window. By default it runs in the " +
+				"background: the call returns an agent id immediately and the completion notification " +
 				"carries the result (status + agent id + final output) — you can intervene with " +
-				"agent_stop / agent_send while it runs. persistent: true keeps it resident (idle) " +
-				"after completion — message it later to continue the same context.",
+				"agent_stop / agent_send while it runs. run_in_background: false blocks until it " +
+				"finishes and returns the output directly. After completing, an agent keeps its " +
+				"context: message it with agent_send to continue.",
 		promptSnippet: "Spawn an isolated sub-agent for heavy, parallel, or context-heavy work",
 		promptGuidelines: HAS_PARENT
 			? [
@@ -441,7 +544,7 @@ export default function (pi: ExtensionAPI) {
 				]
 			: [
 					"Use agent_spawn when a task would flood your context with verbose intermediate output — the sub-agent keeps it in its own window and returns only its final output.",
-					"Use agent_spawn for independent parallel work: several foreground calls already run in parallel. Reserve run_in_background: true for when you need to keep working or reply to the user while the sub-agent runs.",
+					"Use agent_spawn for independent parallel work: spawn several agents in one block. After spawning, keep working on something else or end your turn — each result arrives as its own notification.",
 					"Write agent_spawn prompts self-contained: the sub-agent has zero context — include paths, constraints, and the expected output shape.",
 					"Never poll a background agent — its completion notification carries the result.",
 					"Long outputs are truncated for your context; when that happens the result carries the full-output file path — read it when you need everything.",
@@ -489,13 +592,17 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 
+			// Root default is background — except in print/json mode, where the
+			// host exits after its reply and a background result would be lost.
+			const runInBackground = !HAS_PARENT && (params.run_in_background ?? (ctx.mode === "tui" || ctx.mode === "rpc"));
+
 			const resolved = resolveModel(ctx.modelRegistry, ctx.model, params.model);
 			if (resolved.error) {
 				// Background: render as the status line `Agent <label> start failed:
 				// <reason>` (the id never exists yet — spawn didn't happen).
 				return {
 					content: [{ type: "text", text: resolved.error }],
-					details: params.run_in_background
+					details: runInBackground
 						? { runInBackground: true, label, error: resolved.error }
 						: { error: resolved.error },
 					isError: true,
@@ -514,7 +621,7 @@ export default function (pi: ExtensionAPI) {
 			// surface on the root widget. One module owns the whole decision.
 			const subtree = createSubtreeDisplay({
 				hasParent: HAS_PARENT,
-				foregroundEdge: params.run_in_background !== true,
+				foregroundEdge: !runInBackground,
 				getWidget: () => {
 					ensureWidget(ctx);
 					return widget ?? undefined;
@@ -529,6 +636,9 @@ export default function (pi: ExtensionAPI) {
 			// Live-card details: the shared slice every foreground update carries.
 			const liveDetails = (activity?: AgentActivity): SubagentDetails => ({
 				task,
+				agentId,
+				runInBackground: false,
+				persistent: agent.persistent,
 				startedAt,
 				model: agent.model,
 				thinking: agent.thinking,
@@ -541,25 +651,12 @@ export default function (pi: ExtensionAPI) {
 			const agentId = registry.nextAgentId();
 			// Wake-turn ending → completion notification. The assembly is
 			// identical for both endings except status/output-default.
-			const notifyWake = async (status: "completed" | "failed"): Promise<void> => {
-				const [output, stats] = await Promise.all([agent.lastOutput(), agent.getStats()]);
-				notifyCompletion(pi, agent, {
-					status,
-					output: output || (status === "failed" ? "Follow-up turn failed (model API error)." : output),
-					stats: {
-						tokens: stats?.tokens ?? 0,
-						toolUses: stats?.toolUses ?? 0,
-						durationMs: Date.now() - agent.startedAt,
-					},
-					sessionPath: agent.sessionPath,
-					sessionId: agent.sessionId,
-				});
-			};
+			const notifyWake = (status: "completed" | "failed") => reportWake(agent, status);
 			const live = createLiveChannels({
 				// getWidget, not widget: the widget is created on first use, so a
 				// captured reference would be null for every update before that.
 				surfaces: { getWidget: () => widget ?? undefined, tree },
-				...(params.run_in_background
+				...(runInBackground
 					? {}
 					: {
 							card: {
@@ -587,7 +684,9 @@ export default function (pi: ExtensionAPI) {
 				sessionDir: SUBAGENT_SESSION_DIR,
 				timeoutMs: params.timeoutMs,
 				// Resident after completion (idle, zero token) — explicit opt-in.
-				persistent: params.persistent,
+				// Root children stay resident by default (follow-ups skip the restart);
+				// a sub-agent's own children exit unless asked — agent_send resumes them.
+				persistent: params.persistent ?? !HAS_PARENT,
 				// Identity for in-tree messaging: PI_SUBAGENT_AGENT_ID marks this
 				// process as a child (agent_send is registered on every instance).
 				env: {
@@ -602,15 +701,18 @@ export default function (pi: ExtensionAPI) {
 				// agent_send "delivered" alone would leave the answer unread.
 				// Deliberate stops stay silent (stoppedByControl). A failed
 				// follow-up is reported (abnormal end) then cleaned up.
+				// A wake the user started from the agent view is a side chat: its
+				// answer stays in the agent's own session, never reported up.
 				onIdle: (outcome) => {
+					const reportUp = agent.wakeOrigin === "parent";
 					if (outcome === "completed") {
-						if (!agent.stoppedByControl) {
+						if (!agent.stoppedByControl && reportUp) {
 							void notifyWake("completed").catch(() => {}); // best-effort: must not crash the host
 						}
 						registry.markIdle(agentId);
 						return;
 					}
-					void notifyWake("failed")
+					void (reportUp ? notifyWake("failed") : Promise.resolve())
 						.then(() => tree.remove(agentId, "failed"))
 						.then(() => registry.stopAndRemove(agentId))
 						.catch(() => {}); // best-effort: a cleanup failure must not crash the host
@@ -621,6 +723,22 @@ export default function (pi: ExtensionAPI) {
 				// spawn while its tool call runs.
 				onDelta: (delta) => live.onDelta(agent, delta),
 				onActivityChange: (activity) => live.onActivity(agent, activity),
+				onExit: () => {
+					if (processes.get(agentId) === agent) processes.delete(agentId);
+				},
+			});
+			processes.set(agentId, agent);
+			// The bottom list shows every agent of the conversation, foreground too.
+			ensureWidget(ctx);
+			roster.upsert({
+				agentId,
+				label,
+				startedAt: agent.startedAt,
+				status: "running",
+				model: agent.model,
+				tools: params.tools,
+				cwd: ctx.cwd,
+				indent: 0,
 			});
 
 			// Lifecycle lives in spawn-session.ts — this switch only formats
@@ -629,20 +747,30 @@ export default function (pi: ExtensionAPI) {
 			let outcome: SpawnOutcome;
 			try {
 				outcome = await runSpawnSession(agent, {
-					task,
-					runInBackground: params.run_in_background === true,
+					task: task + CHILD_PROMPT_NOTE,
+					runInBackground,
 					signal,
 					hooks: {
 						onWorking: () =>
 							onUpdate?.({
 								content: [{ type: "text", text: "Working\u2026" }],
-								details: { task, startedAt, model: agent.model, thinking: agent.thinking },
+								details: {
+									task,
+									agentId,
+									runInBackground: false,
+									persistent: agent.persistent,
+									startedAt,
+									model: agent.model,
+									thinking: agent.thinking,
+								} satisfies SubagentDetails,
 							}),
 						onBackgroundStarting: () =>
 							onUpdate?.({
 								content: [{ type: "text", text: `Starting ${agent.label}\u2026` }],
 								details: {
 									runInBackground: true,
+									persistent: agent.persistent,
+									agentId,
 									label: agent.label,
 									model: agent.model,
 									thinking: agent.thinking,
@@ -651,6 +779,7 @@ export default function (pi: ExtensionAPI) {
 						// Background settled: wire widget + registry + the completion
 						// chain here (mechanisms stay on this side of the seam).
 						onBackgroundSettled: (a) => {
+							roster.upsert({ agentId: a.agentId, sessionPath: (a as AgentProcess).sessionPath });
 							ensureWidget(ctx); // widget row added via the registry (non-TUI: no-op)
 							registry.register(a as AgentProcess);
 							tree.add(a, "running"); // up-report: my child exists
@@ -685,21 +814,26 @@ export default function (pi: ExtensionAPI) {
 						// closes the blind spot where a background agent's foreground
 						// children were invisible entirely.
 						onForegroundSettled: (a) => {
+							roster.upsert({ agentId: a.agentId, sessionPath: (a as AgentProcess).sessionPath });
 							if (HAS_PARENT) tree.add(a, "running");
 						},
 					},
 				});
 			} catch (err) {
+				roster.setStatus(agentId, "failed");
 				return toErrorResult(err);
 			}
 
 			subtree.closeCard(); // from here on onUpdate cannot refresh the card
 			switch (outcome.kind) {
 				case "spawn-failed":
+					roster.setStatus(agentId, "failed");
 					// The isError return carries the failure to the LLM and the status
 					// line shows it to the user — no follow-up notification on top.
 					return spawnErrorResult(outcome, {
-						runInBackground: params.run_in_background,
+						runInBackground,
+						persistent: agent.persistent,
+						agentId,
 						label: agent.label,
 					});
 
@@ -708,9 +842,12 @@ export default function (pi: ExtensionAPI) {
 						content: [{ type: "text", text: `Started ${agent.label} (background)` }],
 						details: {
 							runInBackground: true,
+							persistent: agent.persistent,
+							agentId,
 							label: agent.label,
 							model: agent.model,
 							thinking: agent.thinking,
+							sessionPath: agent.sessionPath,
 							startedAt,
 						} satisfies SubagentDetails,
 					});
@@ -723,15 +860,28 @@ export default function (pi: ExtensionAPI) {
 						],
 						details: {
 							runInBackground: true,
+							persistent: agent.persistent,
+							agentId,
 							label: agent.label,
 							model: agent.model,
 							thinking: agent.thinking,
+							sessionPath: agent.sessionPath,
 							startedAt,
 						} satisfies SubagentDetails,
 					};
 				}
 
 				case "finished": {
+					roster.setStatus(
+						agentId,
+						outcome.resident
+							? "idle"
+							: outcome.status === "completed"
+								? "done"
+								: outcome.status === "failed"
+									? "failed"
+									: "stopped",
+					);
 					// Failures and limit-stops are both errors for the caller: the
 					// stopped case (total timeout / hard token limit) must not look
 					// like a clean success. A user cancel (abort) also produces a
@@ -749,6 +899,9 @@ export default function (pi: ExtensionAPI) {
 							content: [{ type: "text", text: truncateForContext(message) }],
 							details: {
 								task,
+								agentId,
+								runInBackground: false,
+								persistent: agent.persistent,
 								startedAt,
 								endedAt: outcome.endedAt,
 								// Full message (uncapped) — the user reads it on the card,
@@ -779,6 +932,9 @@ export default function (pi: ExtensionAPI) {
 						],
 						details: {
 							task,
+							agentId,
+							runInBackground: false,
+							persistent: agent.persistent,
 							sessionPath: outcome.sessionPath,
 							sessionId: outcome.sessionId,
 							startedAt,
@@ -800,6 +956,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "agent_stop",
 		label: "Stop Agent",
+		defaultActive: false,
 		description:
 			"Terminate a sub-agent: a running agent discards its work; a persistent (idle) " +
 			"agent exits and is removed. The completion notification is " +
@@ -871,11 +1028,11 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "agent_send",
 		label: "Send Message",
+		defaultActive: false,
 		description: "Send a message to another agent — a sub-agent or your parent.",
 		promptSnippet: "Send a message to a sub-agent or your parent",
 		promptGuidelines: [
-			"Send follow-up instructions to a persistent agent with agent_send — its context is intact and it wakes to handle the message.",
-			"A sub-agent blocked on missing information should agent_send @parent a concise question; the parent replies the same way.",
+			"A sub-agent blocked on missing information or a decision ends its reply with the question. Answer it (or send any follow-up) with agent_send: the agent continues with its full context — a finished one is resumed from its session automatically — and its answer arrives as a notification.",
 		],
 		parameters: SendParamsSchema,
 
@@ -908,6 +1065,28 @@ export default function (pi: ExtensionAPI) {
 				content: [{ type: "text", text: `Sending to ${atId(target)}\u2026` }],
 				details: { to: target },
 			});
+			// A finished child is revived from its session with the message as
+			// its next turn; the answer comes back as a notification.
+			if (target !== "@parent" && isRevivable(target)) {
+				const label = roster.get(target)?.label;
+				const error = await revive(target, `${formatFrom(MY_AGENT_ID)}${message}`, ctx.cwd, "parent");
+				if (error) {
+					return {
+						content: [{ type: "text", text: `Could not resume ${atId(target)}: ${error}` }],
+						details: { to: target, label, agentId: target, error },
+						isError: true,
+					};
+				}
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Resumed ${atId(target)} with its previous context and delivered the message. Its answer arrives as a notification.`,
+						},
+					],
+					details: { to: target, message, label, agentId: target },
+				};
+			}
 			const r = await handleMessage(pi, registry, { to: target, from: MY_AGENT_ID, message }, true);
 			if (!r.ok) {
 				return {
@@ -931,10 +1110,230 @@ export default function (pi: ExtensionAPI) {
 		...sendView,
 	});
 
+	// ── Agent view (bottom list click / /agents) ──────────
+	// Renderers the main transcript resolved, so a child's bash/read/edit
+	// calls render like pi's own; our three tools render with their views.
+	const rendererCache = new Map<string, ToolRenderers>([
+		["agent_spawn", spawnView as ToolRenderers],
+		["agent_stop", stopView as ToolRenderers],
+		["agent_send", sendView as ToolRenderers],
+	]);
+	pi.registerToolRenderer((toolName, next) => {
+		const renderers = next();
+		if (renderers && !rendererCache.has(toolName)) rendererCache.set(toolName, renderers);
+		return renderers;
+	});
+
+	/** The conversation so far: the live child's, else its session file's. */
+	const loadMessages = async (agentId: string): Promise<unknown[]> => {
+		const live = processes.get(agentId);
+		if (live?.isAlive) {
+			const messages = await live.getMessages();
+			if (messages) return messages;
+		}
+		const sessionPath = roster.get(agentId)?.sessionPath;
+		if (!sessionPath) return [];
+		return buildSessionContext(SessionManager.open(sessionPath).getBranch()).messages;
+	};
+
+	/**
+	 * Bring a finished agent back from its session file with a message as its
+	 * next turn. It stays resident afterwards (idle between turns), addressable
+	 * by agent_send and agent_stop like any persistent agent. A turn the parent
+	 * started (agent_send) reports its answer here like a completion; a turn
+	 * the user started in the agent view is a side chat and reports nothing.
+	 */
+	const revive = async (
+		agentId: string,
+		text: string,
+		cwd: string,
+		origin: "parent" | "user",
+	): Promise<string | undefined> => {
+		const entry = roster.get(agentId);
+		if (!entry?.sessionPath) return "This agent has no session file to resume.";
+		const subtree = createSubtreeDisplay({
+			hasParent: HAS_PARENT,
+			foregroundEdge: false,
+			getWidget: () => widget ?? undefined,
+			forward: (event) => tree.report(event),
+			onFold: () => {},
+		});
+		const live = createLiveChannels({ surfaces: { getWidget: () => widget ?? undefined, tree } });
+		const agent: AgentProcess = new AgentProcess({
+			agentId,
+			label: entry.label,
+			cwd: entry.cwd ?? cwd,
+			tools: entry.tools,
+			persistent: true,
+			resumeSession: entry.sessionPath,
+			env: { PI_SUBAGENT_AGENT_ID: agentId },
+			onMessage: onChildMessage,
+			onTreeEvent: (event) => subtree.onTreeEvent(event),
+			onIdle: (outcome) => {
+				const reportUp = agent.wakeOrigin === "parent" && !agent.stoppedByControl;
+				if (outcome === "completed") {
+					if (reportUp) void reportWake(agent, "completed").catch(() => {});
+					registry.markIdle(agentId);
+					return;
+				}
+				void (reportUp ? reportWake(agent, "failed") : Promise.resolve())
+					.then(() => registry.stopAndRemove(agentId))
+					.catch(() => {});
+			},
+			onDelta: (delta) => live.onDelta(agent, delta),
+			onActivityChange: (activity) => live.onActivity(agent, activity),
+			onExit: () => {
+				if (processes.get(agentId) === agent) processes.delete(agentId);
+			},
+		});
+		agent.wakeOrigin = origin;
+		processes.set(agentId, agent);
+		const started = await agent.spawnAndSend(text);
+		if (!started.ok) {
+			processes.delete(agentId);
+			await agent.stop().catch(() => {});
+			return started.error;
+		}
+		registry.register(agent, "running");
+		roster.upsert({ agentId, status: "running", endedAt: undefined });
+		void agent
+			.waitForCompletion()
+			.then(async (completion) => {
+				// Parent-started: the completion policy notifies and keeps it resident.
+				if (agent.wakeOrigin === "parent") await registry.complete(agent, completion);
+				else if (completion.status === "completed") registry.markIdle(agentId);
+				else await registry.stopAndRemove(agentId);
+			})
+			.catch(() => {});
+		return undefined;
+	};
+
+	/** A direct child whose process is gone but whose session can be resumed. */
+	const isRevivable = (agentId: string): boolean => {
+		const entry = roster.get(agentId);
+		return !!entry?.sessionPath && entry.indent === 0 && !registry.lookup(agentId) && !processes.get(agentId)?.isAlive;
+	};
+
+	/** Deliver a message typed in the agent view. */
+	const sendFromView = async (agentId: string, text: string, cwd: string): Promise<string | undefined> => {
+		const live = processes.get(agentId);
+		if (!live?.isAlive) return revive(agentId, text, cwd, "user");
+		const wasIdle = roster.get(agentId)?.status === "idle";
+		const ok = await live.sendMessage(text, "user");
+		if (!ok) return "Delivery failed.";
+		if (wasIdle) roster.setStatus(agentId, "running");
+		return undefined;
+	};
+
+	let viewOpen = false;
+	openAgent = (agentId: string) => {
+		const ui = viewUi;
+		if (!ui || viewOpen || !roster.get(agentId)) return;
+		viewOpen = true;
+		const cwd = roster.get(agentId)?.cwd ?? process.cwd();
+		void ui
+			.custom<void>(
+				(tui, theme, keybindings, done) =>
+					new AgentView(
+						tui,
+						theme,
+						keybindings,
+						{
+							agentId,
+							cwd,
+							entry: () => roster.get(agentId),
+							subscribe: (listener) => processes.get(agentId)?.subscribe(listener),
+							processKey: () => processes.get(agentId),
+							loadMessages: () => loadMessages(agentId),
+							send: (text) => sendFromView(agentId, text, cwd),
+							onRosterChange: (listener) => roster.onChange(listener),
+							renderers: (toolName) => rendererCache.get(toolName) ?? fallbackRenderers(toolName),
+						},
+						() => done(undefined),
+					),
+				{ overlay: true, overlayOptions: { anchor: "top-left", width: "100%", maxHeight: "100%", margin: 0 } },
+			)
+			.finally(() => {
+				viewOpen = false;
+			});
+	};
+
+	pi.registerCommand("agents", {
+		description: "List this conversation's sub-agents and open one (/agents [id])",
+		handler: async (args, ctx) => {
+			if (ctx.mode !== "tui") {
+				ctx.ui.notify("/agents needs the interactive TUI.", "warning");
+				return;
+			}
+			viewUi = ctx.ui;
+			ensureWidget(ctx);
+			const entries = roster.list();
+			if (entries.length === 0) {
+				ctx.ui.notify("No sub-agents in this conversation yet.", "info");
+				return;
+			}
+			const wanted = args.trim().replace(/^@/, "");
+			if (wanted && roster.get(wanted)) {
+				openAgent(wanted);
+				return;
+			}
+			const options = entries.map((e) => `${"  ".repeat(e.indent)}${atId(e.agentId)} \u2014 ${e.label}  (${e.status})`);
+			const picked = await ctx.ui.select("Sub-agents", options);
+			if (picked === undefined) return;
+			const entry = entries[options.indexOf(picked)];
+			if (entry) openAgent(entry.agentId);
+		},
+	});
+
 	// ── Notification card (user side) ───────────────────
 	pi.registerMessageRenderer("subagent-notification", renderNotification);
 
 	// ── Cleanup on exit ─────────────────────────────────
+	// A resumed (or /tree-navigated) conversation that had enabled the agent
+	// tools gets them back: pi rebuilds the active set from registration
+	// defaults, which would otherwise record their removal on the next turn.
+	const restoreAgentTools = (ctx: ExtensionContext): void => {
+		try {
+			if (!transcriptEnabledAgentTools(ctx)) return;
+			pi.setActiveTools([...new Set([...pi.getActiveTools(), ...SUBAGENT_TOOL_NAMES])]);
+		} catch {
+			// Best effort: the loader stays available to re-enable them.
+		}
+	};
+	// The roster a session start sees is its transcript's (resume, reload,
+	// session switch), plus any agent process still alive in this host.
+	const rebuildRoster = (ctx: ExtensionContext): void => {
+		let entries: ReturnType<typeof rosterFromMessages> = [];
+		try {
+			entries = rosterFromMessages(buildSessionContext(ctx.sessionManager.getBranch()).messages, ctx.cwd);
+		} catch {
+			// A transcript we cannot read leaves the roster empty.
+		}
+		roster.reset(entries);
+		for (const agent of processes.values()) {
+			if (!agent.isAlive) continue;
+			roster.upsert({
+				agentId: agent.agentId,
+				label: agent.label,
+				startedAt: agent.startedAt,
+				status: agent.status === "running" ? "running" : "idle",
+				sessionPath: agent.sessionPath,
+				model: agent.model,
+				indent: 0,
+			});
+		}
+		registry.reserveIds(roster.list().map((e) => e.agentId));
+		if (ctx.mode === "tui") {
+			viewUi = ctx.ui;
+			ensureWidget(ctx);
+		}
+	};
+	pi.on("session_start", (_event, ctx) => {
+		restoreAgentTools(ctx);
+		rebuildRoster(ctx);
+	});
+	pi.on("session_tree", (_event, ctx) => restoreAgentTools(ctx));
+
 	pi.on("session_shutdown", async (event) => {
 		// Quit: the whole process is ending. Reload: pi rebuilds the extension
 		// runtime in the same process — emitSessionShutdownEvent(reason:"reload")
@@ -947,5 +1346,8 @@ export default function (pi: ExtensionAPI) {
 		// (stdin EOF → rpc shutdown) even if the parent dies first, because
 		// the pipe closes — no tmux, no disk cleanup, no signals.
 		await registry.shutdown();
+		processes.clear();
+		widget?.dispose();
+		widget = null;
 	});
 }

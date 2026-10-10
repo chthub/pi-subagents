@@ -9,7 +9,8 @@
  */
 
 import type { SubagentDetails } from "./types.js";
-import { durationMeta } from "./ui/spinner.js";
+import type { CardField } from "./ui/card.js";
+import { durationMeta, formatDuration } from "./ui/spinner.js";
 import { createToolView } from "./ui/view.js";
 import { counterParts } from "./ui/widget.js";
 
@@ -42,6 +43,59 @@ export function titleFrom(ctx: { result?: { data?: unknown }; args?: unknown }, 
 	return label ?? (id ? atId(String(id)) : "");
 }
 
+/** agent_spawn arguments as the LLM wrote them (any field may be missing while streaming). */
+interface SpawnArgs {
+	prompt?: string;
+	model?: string;
+	thinking?: string;
+	tools?: string[];
+	run_in_background?: boolean;
+	persistent?: boolean;
+	timeoutMs?: number;
+}
+
+/** Collapsed prompt cap (visual lines) — the write card's head preview size. */
+const PROMPT_FOLD_LINES = 10;
+
+/**
+ * The call record on the spawn card: every argument as the LLM wrote it,
+ * with what the mechanism resolved it to (inherited model/thinking, the
+ * default mode, the full model id) — so the user can audit the call.
+ */
+export function spawnFields(args: unknown, d: SubagentDetails | undefined): CardField[] {
+	const a = (args ?? {}) as SpawnArgs;
+	const fields: CardField[] = [];
+	if (d?.agentId) fields.push({ key: "agent", value: atId(d.agentId) });
+
+	const background = d?.runInBackground ?? a.run_in_background;
+	const persistent = d?.persistent ?? a.persistent;
+	const mode = [
+		background === undefined ? undefined : background ? "background" : "foreground",
+		persistent ? "persistent" : undefined,
+		a.timeoutMs ? `timeout ${formatDuration(a.timeoutMs)}` : undefined,
+	].filter((m): m is string => m !== undefined);
+	const defaulted =
+		(a.run_in_background === undefined && background !== undefined) ||
+		(a.persistent === undefined && persistent !== undefined);
+	if (mode.length > 0)
+		fields.push({ key: "mode", value: mode.join(" \u00b7 "), note: defaulted ? "(default)" : undefined });
+
+	fields.push(resolvedField("model", a.model, d?.model));
+	fields.push(resolvedField("thinking", a.thinking, d?.thinking));
+	fields.push(
+		a.tools?.length ? { key: "tools", value: a.tools.join(", ") } : { key: "tools", value: "all", note: "(default)" },
+	);
+	if (a.prompt) fields.push({ key: "prompt", value: a.prompt, fold: PROMPT_FOLD_LINES });
+	return fields;
+}
+
+/** `written → resolved`, or the inherited value when the argument was omitted. */
+function resolvedField(key: string, written: string | undefined, resolved: string | undefined): CardField {
+	if (!written) return resolved ? { key, value: resolved, note: "(inherited)" } : { key, value: "inherited" };
+	if (resolved && resolved !== written) return { key, value: `${written} \u2192 ${resolved}` };
+	return { key, value: written };
+}
+
 export const spawnView = createToolView<Record<string, unknown>, SubagentDetails>({
 	name: "agent_spawn",
 	title: (ctx) => {
@@ -61,14 +115,11 @@ export const spawnView = createToolView<Record<string, unknown>, SubagentDetails
 		const d = ctx.result?.data;
 		return d?.runInBackground ? "started" : "done";
 	},
+	// Model and thinking live in the call record below — the header keeps
+	// only what changes: duration and the nested-subtree counters.
 	meta: (ctx) => {
 		const d = ctx.result?.data;
-		const args = ctx.args as { model?: unknown; thinking?: unknown } | undefined;
 		const parts: string[] = [];
-		const model = d?.model ?? args?.model;
-		if (model) parts.push(String(model));
-		const thinking = d?.thinking ?? args?.thinking;
-		if (thinking) parts.push(String(thinking));
 		// Duration meta: live Elapsed while running, fixed Took on completion;
 		// a background spawn has no duration (the widget tracks it live).
 		if (d?.startedAt != null) {
@@ -86,21 +137,18 @@ export const spawnView = createToolView<Record<string, unknown>, SubagentDetails
 		}
 		return parts;
 	},
+	// The call record (prompt included) sits above the activity stream and
+	// never scrolls out with it.
+	fields: (ctx) => spawnFields(ctx.args, ctx.result?.data),
 	body: {
 		rows: {
-			of: (ctx) => {
-				const d = ctx.result?.data;
-				// Mixed activity stream: the task (prompt) heads the flow, then
-				// the sub-agent session events in order — both scroll out of
-				// the fold as output grows (SPEC: prompt 在流头).
-				const events = d?.events ?? [];
-				return d?.task ? [{ kind: "prompt", text: d.task }, ...events] : events;
-			},
+			// The sub-agent session events in order; the earliest scroll out of
+			// the fold as output grows.
+			of: (ctx) => ctx.result?.data?.events ?? [],
 			rows: [
 				{
 					content: (_ctx, ev) => {
 						const e = ev as { kind: string; name?: string; args?: string; text?: string };
-						if (e.kind === "prompt") return { style: "muted", content: e.text ?? "" };
 						if (e.kind === "thinking") return { style: "thinking", content: "Thinking..." };
 						if (e.kind === "tool") return { style: "tool", content: `${e.name ?? ""}: ${e.args ?? ""}` };
 						return { style: "text", content: e.text ?? "" };
@@ -110,8 +158,8 @@ export const spawnView = createToolView<Record<string, unknown>, SubagentDetails
 		},
 	},
 	// Session footer: recoverable on the card, never into LLM context
-	// (SPEC: footer 仅 session: <path>). Present on foreground completion;
-	// background spawn cards carry no session yet.
+	// (SPEC: footer 仅 session: <path>). Foreground completion and a started
+	// background spawn both carry it.
 	footer: (ctx) => ctx.result?.data?.sessionPath,
 });
 

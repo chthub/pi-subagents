@@ -18,7 +18,15 @@ import {
 	type Theme,
 	type ToolRenderResultOptions,
 } from "@earendil-works/pi-coding-agent";
-import { type Component, dataCard, iconForStatus, renderHeader, type StyledRow, textLine } from "./card.js";
+import {
+	type CardField,
+	type Component,
+	dataCard,
+	iconForStatus,
+	renderHeader,
+	type StyledRow,
+	textLine,
+} from "./card.js";
 import { SPINNER_TICK_MS, Spinner } from "./spinner.js";
 import { ticker } from "./ticker.js";
 
@@ -81,6 +89,8 @@ interface ToolView<Args, Data> {
 	tail?: (ctx: ViewContext<Args, Data>) => string | undefined;
 	/** Header meta slot (muted parens, · separated). */
 	meta?: (ctx: ViewContext<Args, Data>) => string[] | undefined;
+	/** Call record above the body (key/value rows, e.g. the tool's arguments). */
+	fields?: (ctx: ViewContext<Args, Data>) => CardField[] | undefined;
 	/** Body: text / result list / activity rows (folded automatically). */
 	body?: ViewBody<Args, Data>;
 	/** Card footer line (muted, below the folded body). */
@@ -226,6 +236,7 @@ export function createToolView<Args, Data>(
 				title: view.title?.(ctx),
 				tail: tailText ?? undefined,
 				meta: view.meta?.(ctx),
+				fields: view.fields?.(ctx),
 				body,
 				preview: view.preview,
 				footer: view.footer?.(ctx),
@@ -297,6 +308,7 @@ export function createToolView<Args, Data>(
 					{
 						status,
 						name: view.name,
+						fields: view.fields?.(ctx),
 						body: bodyRows(view, ctx),
 						preview: view.preview,
 						footer: view.footer?.(ctx),

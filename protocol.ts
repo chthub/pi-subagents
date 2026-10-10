@@ -42,12 +42,18 @@ interface RpcCommandGetSessionStats {
 	type: "get_session_stats";
 }
 
+interface RpcCommandGetMessages {
+	id?: string;
+	type: "get_messages";
+}
+
 export type RpcCommand =
 	| RpcCommandPrompt
 	| RpcCommandAbort
 	| RpcCommandGetLastAssistantText
 	| RpcCommandGetState
-	| RpcCommandGetSessionStats;
+	| RpcCommandGetSessionStats
+	| RpcCommandGetMessages;
 
 // ─── Responses and events we read from stdout ──────────────
 

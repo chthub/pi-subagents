@@ -22,7 +22,7 @@ Pi 没有内置 sub-agent。于是重活、并行的活、吃上下文的活，�
 - **安静上下文** — 日志、搜索结果、测试输出留在子窗口里。你拿到最终结果，不是一片杂乱。
 - **真正并行** — 一次起多个后台 agent，各自完成时投递自己的通知。无队列、无取结果工具。
 - **全程可控** — `agent_send` 给运行中的 agent 发消息重定向（也能唤醒空闲的），`agent_stop` 终止。子 agent 发往父会话的消息是尽力投递（无确认）。
-- **按需常驻** — `agent_spawn(persistent: true)` 后，子 agent 完成后进程驻留 idle（零 token）；之后随时 `agent_send` 唤醒、在同一上下文继续追问，或 `agent_stop` 结束。
+- **追问保留上下文** —— 子代理完成后默认常驻（空闲，零 token；每个约 180 MB 内存），`agent_send` 发给进程已退出的子代理时会从会话文件自动复活它。子代理缺信息或需要决策时，把问题作为最后的回答结束；父代理用 `agent_send` 回答，子代理接着原来的上下文继续。
 - **Pi 原生** — 渲染、会话、attach 全复用 pi 自己的机制；卡片看起来像内置工具——因为它们就是。
 - **继承或覆盖** — 子 agent 默认继承你的模型与推理强度，也可逐个覆盖。便宜模型做侦察，强模型做实现。
 - **无隐藏限制** — 默认无 token 上限、无超时、无并发上限。需要时用可选 `timeoutMs` 加一道护栏。
@@ -89,6 +89,27 @@ Pi 在同一块里发三次 `agent_spawn`——前台调用并行执行，每次
 
 Pi 调用 `agent_send` 向运行中的 agent 注入重定向消息（当前 turn 结束后送达）。要停掉失控的 agent：“干掉那个后台子 agent” → `agent_stop`。两者对运行中的 agent 都适用；`persistent: true` 的话，完成后依然可寻址——`agent_send` 唤醒空闲的 agent 继续追问，`agent_stop` 结束。
 
+## 启用方式
+
+三个 agent 工具注册时**默认不激活**：不派子代理的对话里不带它们的参数说明和指引。常驻的只有一个无参数的 `subagent_enable`，你提到子代理（或任务明显适合委托）时模型会先调用它，下一次请求起三个工具才出现。启用记录写进会话，resume 后仍然有效。
+
+## 底部列表与子代理窗口
+
+输入框下方列出本对话的所有子代理，一行一个（运行中 / 空闲 / 完成 / 失败 / 停止）：
+
+```
+ ⠋ @jude  只读目录检查   12s  bash: ls -la
+ ‖ @yara  keeper        idle
+ ✓ @max   分析 auth 模块  1m3s
+ 点击进入 · /agents
+```
+
+- **点击某一行**（pi 默认的全屏模式下可用），或输入 **`/agents`**（`/agents max` 直接打开），进入该子代理的全屏窗口：用 pi 原生组件显示它的完整对话，运行中实时更新。
+- **在窗口里直接打字和它对话。** 这是侧聊：回答只留在子代理自己的会话里，**不会**通知主 agent。已结束的子代理在你发第一条消息时用 `pi --mode rpc --session <路径>` 复活，之后常驻（空闲）到主会话结束或被 `agent_stop`。
+- **鼠标悬停**时高亮当前行。在 tmux、zellij、screen 里 pi 不开启鼠标移动上报，所以没有悬停高亮，但点击照常可用。
+- **Esc** 回到主对话；PgUp/PgDn 或滚轮滚动；ctrl+o 展开工具输出。
+- resume 或 `/reload` 后列表会从会话记录重建（进程不会保留，会话文件会）。
+
 ## 配置
 
 ### 环境变量
@@ -110,9 +131,9 @@ Pi 调用 `agent_send` 向运行中的 agent 注入重定向消息（当前 turn
 | `model` | string | 继承 | 覆盖子 agent 的模型。指定但注册表中找不到 → **报错，不静默降级**。 |
 | `thinking` | `"off"`…`"max"` | 继承 | 覆盖推理强度；省略则用当前会话的级别。 |
 | `tools` | string[] | 全部 | 子 agent 可见的工具白名单——白名单之外全部不可见。 |
-| `run_in_background` | boolean | `false` | 前台（默认）阻塞到结果就绪；`true` 立即返回 `agent_id`，完成时投递携带最终输出的通知。 |
+| `run_in_background` | boolean | `true` | 后台（默认）立即返回 `agent_id`，完成时投递携带最终输出的通知；`false` 阻塞到结果就绪。`pi -p` / json 模式下省略时走前台（宿主答完即退出，后台结果会丢）。子代理里没有这个参数，只能前台。 |
 | `timeoutMs` | number | 无 | 可选截止时间（毫秒）。触发时扩展停止子进程、等其 settled 后优雅退出。 |
-| `persistent` | boolean | `false` | 完成后进程驻留 idle（零 token）而非退出；之后 `agent_send` 可唤醒继续同一上下文，`agent_stop` 结束。前台/后台都支持。 |
+| `persistent` | boolean | `true`（根会话）/ `false`（子代理内） | 完成后常驻（空闲，零 token），追问时不用重启；`agent_stop` 结束它。`false` 时完成即退出，`agent_send` 仍会从会话文件复活它。 |
 
 #### `agent_stop` — 终止一个 agent
 
@@ -125,7 +146,7 @@ Pi 调用 `agent_send` 向运行中的 agent 注入重定向消息（当前 turn
 | 参数 | 含义 |
 |---|---|
 | `to` | **必填** — agent_spawn 给到的 agent id（短人名，如 `max`），或 `"@parent"` 发给 spawn 你的会话。 |
-| `message` | **必填** — 消息文本；目标当前 turn 结束后送达，idle 的 persistent agent 会被唤醒。 |
+| `message` | **必填** —— 消息文本；在目标当前轮结束后送达，唤醒空闲子代理，或从会话文件复活已结束的子代理（回答以通知送回）。 |
 
 消息沿树的父子边路由：直接子 agent 下投，`@parent` 上抛，跨层/兄弟消息经途经的父 LLM 上下文中转（见[嵌套 sub-agent](#嵌套-sub-agent)）。
 

@@ -87,6 +87,11 @@ export class AgentRegistry {
 		return name;
 	}
 
+	/** Keep ids already used in this conversation (restored from the transcript) out of the pool. */
+	reserveIds(ids: Iterable<string>): void {
+		for (const id of ids) this.usedNames.add(id);
+	}
+
 	/** Track a background agent: registry entry + widget row. */
 	register(agent: RegisteredAgent, status: "running" | "idle" = "running"): void {
 		this.agents.set(agent.agentId, agent);

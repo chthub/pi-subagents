@@ -218,3 +218,43 @@ describe("createToolView — clock-driven animation while processing", () => {
 		assert.equal(ticker.subscriberCount, 0, "bare body renders stay passive");
 	});
 });
+
+describe("dataCard fields block and wrapping", () => {
+	const longValue = "word ".repeat(40).trim();
+	const render = (expanded: boolean, width = 40) =>
+		dataCard(
+			{
+				status: "success",
+				name: "probe",
+				fields: [
+					{ key: "mode", value: "background", note: "(default)" },
+					{ key: "prompt", value: longValue, fold: 2 },
+				],
+				body: [{ style: "text", content: longValue }],
+				expanded,
+			},
+			theme,
+		).render(width);
+
+	it("wraps field values under a hanging indent and never exceeds the width", () => {
+		const lines = render(true);
+		const promptLines = lines.slice(lines.findIndex((l) => l.startsWith("prompt")));
+		assert.ok(promptLines[1].startsWith("        word"), "continuation lines are indented under the value");
+		for (const line of lines) assert.ok(line.length <= 40, `line wider than 40: ${JSON.stringify(line)}`);
+		assert.ok(lines.some((l) => l === "mode    background (default)"));
+	});
+
+	it("folds a field with `fold` when collapsed and shows it whole when expanded", () => {
+		const collapsed = render(false).filter((l) => l.startsWith("        word") || l.startsWith("prompt"));
+		assert.equal(collapsed.length, 2);
+		assert.ok(render(false).some((l) => l.includes("more lines")));
+		assert.ok(render(true).filter((l) => l.startsWith("        word")).length > 2);
+	});
+
+	it("expanded body rows wrap to the width (a raw over-wide row used to be clipped)", () => {
+		const lines = render(true, 30);
+		for (const line of lines) assert.ok(line.trimEnd().length <= 30, `line wider than 30: ${JSON.stringify(line)}`);
+		const words = lines.join(" ").match(/word/g) ?? [];
+		assert.equal(words.length, 80, "no word of the prompt or the body is dropped");
+	});
+});

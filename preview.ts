@@ -16,6 +16,7 @@ import { initTheme, type Theme } from "@earendil-works/pi-coding-agent";
 import type { AgentProcess } from "./agent-process.js";
 import type { AgentActivity } from "./event-interpret.js";
 import { renderNotification } from "./render.js";
+import { Roster } from "./roster.js";
 import type { RenderEvent, SubagentDetails } from "./types.js";
 import { createPreviewRuntime } from "./ui/preview-runtime.js";
 import type { WidgetResult } from "./ui/widget.js";
@@ -320,7 +321,7 @@ const widgetUi = {
 		widgetRender = factory ? factory({ requestRender: () => {} }, theme).render : undefined;
 	},
 } as never;
-const widget = new AgentWidget(widgetUi as never);
+const widget = new AgentWidget(widgetUi as never, new Roster(), () => {});
 const fakeAgent = (agentId: string, label: string, startedAt: number, activity: unknown) =>
 	({
 		agentId,

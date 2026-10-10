@@ -9,7 +9,15 @@
  */
 
 import { keyHint, type Theme, truncateToVisualLines } from "@earendil-works/pi-coding-agent";
-import { Box, type Component, Container, Text, truncateToWidth } from "@earendil-works/pi-tui";
+import {
+	Box,
+	type Component,
+	Container,
+	Text,
+	truncateToWidth,
+	visibleWidth,
+	wrapTextWithAnsi,
+} from "@earendil-works/pi-tui";
 
 export type { Component } from "@earendil-works/pi-tui";
 
@@ -119,12 +127,12 @@ function foldedBlockWith(
 	dir: "head" | "tail",
 	lines: number,
 ): BodyComponent {
-	if (expanded) {
-		// Full render — every row, no fold. Content is never dropped in either
-		// mode; expanded just stops capping what fills the screen.
-		return { invalidate: () => {}, render: () => ["", ...styledRows] };
-	}
 	const body = styledRows.join("\n");
+	if (expanded) {
+		// Full render — every row, no fold, wrapped to the width like the
+		// collapsed preview (a raw row wider than the terminal gets clipped).
+		return { invalidate: () => {}, render: (w: number) => ["", ...new Text(body, 0, 0).render(w)] };
+	}
 	return {
 		invalidate: () => {},
 		render: (w: number) => {
@@ -161,6 +169,52 @@ function foldedBlockWith(
 					? `${theme.fg("muted", `... (${preview.skippedCount} more lines,`)} ${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`
 					: `${theme.fg("muted", `... (${preview.skippedCount} earlier lines,`)} ${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`;
 			return ["", truncateToWidth(hint, w, "..."), ...preview.visualLines];
+		},
+	};
+}
+
+/** One labelled row of a card's call record (`prompt  …`, `tools  bash`). */
+export interface CardField {
+	key: string;
+	value: string;
+	/** Dim annotation after the value, e.g. "(inherited)". */
+	note?: string;
+	/** Collapsed cap in visual lines; the rest folds behind the expand hint. Omit = always full. */
+	fold?: number;
+}
+
+/**
+ * Key/value block: keys in a muted column, values wrapped to the remaining
+ * width with a hanging indent so a long prompt stays readable. A field with
+ * `fold` shows its first lines collapsed and everything when expanded.
+ */
+function fieldsBlock(fields: CardField[], theme: Theme, expanded: boolean): BodyComponent {
+	return {
+		invalidate: () => {},
+		render: (w: number) => {
+			const keyWidth = Math.max(...fields.map((f) => visibleWidth(f.key))) + 2;
+			const valueWidth = Math.max(10, w - keyWidth);
+			const pad = " ".repeat(keyWidth);
+			const out = [""];
+			for (const f of fields) {
+				const styled = theme.fg("toolOutput", f.value) + (f.note ? ` ${theme.fg("dim", f.note)}` : "");
+				let lines = styled.split("\n").flatMap((l) => wrapTextWithAnsi(l, valueWidth));
+				if (lines.length === 0) lines = [""];
+				let hidden = 0;
+				if (!expanded && f.fold !== undefined && lines.length > f.fold) {
+					hidden = lines.length - f.fold;
+					lines = lines.slice(0, f.fold);
+				}
+				lines.forEach((line, i) => {
+					const key = i === 0 ? theme.fg("muted", f.key + " ".repeat(keyWidth - visibleWidth(f.key))) : pad;
+					out.push(key + line);
+				});
+				if (hidden > 0) {
+					const hint = `${theme.fg("muted", `... (${hidden} more lines,`)} ${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`;
+					out.push(pad + truncateToWidth(hint, valueWidth, "..."));
+				}
+			}
+			return out;
 		},
 	};
 }
@@ -287,6 +341,8 @@ interface DataCardConfig {
 	tail?: string;
 	/** Muted parenthesized meta (channel echo, counts). */
 	meta?: string[];
+	/** Call record shown above the body (key/value rows). */
+	fields?: CardField[];
 	/** Body — plain text or styled rows; folded automatically. */
 	body?: string | StyledRow[];
 	/** Preview direction: tail (bash, default) or head (write-like). */
@@ -324,48 +380,54 @@ export function iconForStatus(status: CardStatus, spinner?: Spinner): CardIcon {
  * content gets a tail preview + expand hint, full when expanded).
  */
 export function dataCard(config: DataCardConfig, theme: Theme, spinner?: Spinner): Component {
-	return renderCard(
-		{
-			header: config.bare
-				? undefined
-				: {
-						icon: iconForStatus(config.status, spinner),
-						name: config.name,
-						title: config.title,
-						tail: config.tail ? { text: config.tail, color: config.status === "error" ? "error" : "muted" } : undefined,
-						meta: config.meta,
-					},
-			body:
-				config.body || config.error
-					? typeof config.body === "string"
-						? config.preview === "head"
-							? {
-									extra: [
-										foldedBlockHead(
-											config.body.split("\n").map((l) => theme.fg("toolOutput", l)),
+	const card = dataCardConfig(config, theme, spinner);
+	if (config.fields?.length) {
+		const fields = fieldsBlock(config.fields, theme, config.expanded);
+		card.body = { ...card.body, extra: [fields, ...(card.body?.extra ?? [])] };
+	}
+	return renderCard(card, theme);
+}
+
+function dataCardConfig(config: DataCardConfig, theme: Theme, spinner?: Spinner): CardConfig {
+	return {
+		header: config.bare
+			? undefined
+			: {
+					icon: iconForStatus(config.status, spinner),
+					name: config.name,
+					title: config.title,
+					tail: config.tail ? { text: config.tail, color: config.status === "error" ? "error" : "muted" } : undefined,
+					meta: config.meta,
+				},
+		body:
+			config.body || config.error
+				? typeof config.body === "string"
+					? config.preview === "head"
+						? {
+								extra: [
+									foldedBlockHead(
+										config.body.split("\n").map((l) => theme.fg("toolOutput", l)),
+										theme,
+										config.expanded,
+									),
+								],
+								error: config.error,
+							}
+						: { message: config.body, error: config.error }
+					: {
+							extra: (config.body as StyledRow[]).length
+								? [
+										(config.preview === "head" ? foldedBlockHead : foldedBlock)(
+											(config.body as StyledRow[]).map((r) => styleRow(r, theme)),
 											theme,
 											config.expanded,
 										),
-									],
-									error: config.error,
-								}
-							: { message: config.body, error: config.error }
-						: {
-								extra: (config.body as StyledRow[]).length
-									? [
-											(config.preview === "head" ? foldedBlockHead : foldedBlock)(
-												(config.body as StyledRow[]).map((r) => styleRow(r, theme)),
-												theme,
-												config.expanded,
-											),
-										]
-									: undefined,
-								error: config.error,
-							}
-					: undefined,
-			expanded: config.expanded,
-			footer: config.footer,
-		},
-		theme,
-	);
+									]
+								: undefined,
+							error: config.error,
+						}
+				: undefined,
+		expanded: config.expanded,
+		footer: config.footer,
+	};
 }

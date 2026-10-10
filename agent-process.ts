@@ -74,6 +74,10 @@ export interface AgentProcessOptions {
 	persistent?: boolean;
 	/** Extra child environment (identity injection: PI_SUBAGENT_AGENT_ID / PI_SUBAGENT_PARENT). */
 	env?: NodeJS.ProcessEnv;
+	/** Continue an existing session file (revive) instead of starting a new session. */
+	resumeSession?: string;
+	/** The child process exited (any reason). */
+	onExit?: () => void;
 }
 
 interface AgentProcessDeps {
@@ -124,6 +128,13 @@ export class AgentProcess {
 	sessionPath?: string;
 	sessionId?: string;
 
+	/** Who started the current wake turn: the parent's agent_send, or the user
+	 *  typing in the agent view (a side chat — its answer is not reported up). */
+	wakeOrigin: "parent" | "user" = "parent";
+
+	/** Raw rpc event listeners (the agent view renders the live transcript). */
+	private readonly listeners = new Set<(event: RpcEvent) => void>();
+
 	constructor(options: AgentProcessOptions, deps: AgentProcessDeps = {}) {
 		this.agentId = options.agentId;
 		this.label = options.label;
@@ -142,19 +153,29 @@ export class AgentProcess {
 		if (options.model) args.push("--model", options.model);
 		if (options.thinking) args.push("--thinking", options.thinking);
 		if (options.tools && options.tools.length > 0) args.push("--tools", options.tools.join(","));
-		// Label names the session (--name, capped at 80 chars).
-		args.push("--name", options.label.slice(0, 80));
-		if (options.sessionDir) args.push("--session-dir", options.sessionDir);
+		if (options.resumeSession) {
+			// Revive: the session file already carries its name, model and thinking.
+			args.push("--session", options.resumeSession);
+			this.sessionPath = options.resumeSession;
+		} else {
+			// Label names the session (--name, capped at 80 chars).
+			args.push("--name", options.label.slice(0, 80));
+			if (options.sessionDir) args.push("--session-dir", options.sessionDir);
+		}
 
 		const clientOptions: RpcClientOptions = {
 			args,
 			cwd: options.cwd,
 			env: options.env,
-			onEvent: (event) => this.onEvent(event),
+			onEvent: (event) => {
+				this.onEvent(event);
+				for (const listener of this.listeners) listener(event);
+			},
 			onExit: () => {
 				// Process died (any reason): release everyone waiting on settle.
 				this.settle();
 				this.done = true;
+				options.onExit?.();
 			},
 		};
 		this.client = deps.createClient ? deps.createClient(clientOptions) : new RpcClient(clientOptions);
@@ -199,7 +220,8 @@ export class AgentProcess {
 	 * the prompt preflight accepted the message. Waking an idle persistent
 	 * agent flips it back to running.
 	 */
-	async sendMessage(text: string): Promise<boolean> {
+	async sendMessage(text: string, origin: "parent" | "user" = "parent"): Promise<boolean> {
+		this.wakeOrigin = origin;
 		const response = await this.client
 			.sendCommand({ type: "prompt", message: text, streamingBehavior: "steer" })
 			.catch((err: Error) => ({
@@ -212,6 +234,23 @@ export class AgentProcess {
 		// Woke an idle persistent agent — activity resumes.
 		if (this.status === "completed") this.status = "running";
 		return true;
+	}
+
+	/** Subscribe to the child's raw rpc events. Returns the unsubscribe function. */
+	subscribe(listener: (event: RpcEvent) => void): () => void {
+		this.listeners.add(listener);
+		return () => this.listeners.delete(listener);
+	}
+
+	/** The child's current conversation (rpc get_messages); null when unavailable. */
+	async getMessages(): Promise<unknown[] | null> {
+		const data = await this.sendData<{ messages?: unknown[] }>({ type: "get_messages" });
+		return data?.messages ?? null;
+	}
+
+	/** Whether the child process is still up (running or resident idle). */
+	get isAlive(): boolean {
+		return !this.client.isClosed;
 	}
 
 	/** Current final assistant text (rpc get_last_assistant_text). */

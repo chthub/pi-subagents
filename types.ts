@@ -37,6 +37,8 @@ export type SubagentDetails = {
 	/** Reasoning intensity ("off"…"max"), or inherited level when omitted. */
 	thinking?: string;
 	runInBackground?: boolean;
+	/** Resolved residency (the persistent argument, or its default). */
+	persistent?: boolean;
 	/** Spawn failure reason — rendered as `start failed: <reason>` on the status line. */
 	error?: string;
 	sessionPath?: string;

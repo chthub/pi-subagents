@@ -1,116 +1,307 @@
 /**
- * pi-subagent — AgentWidget.
+ * pi-subagents — the bottom agent list.
  *
- * Persistent above-editor widget showing one status line per tracked agent:
- * `⠋ label (42.0s)`, plus a latest-activity excerpt line aligned under the
- * label. Backed by the shared pi-ui StatusWidget (generic foreground
- * indicator for background work); the agent-specific part is the row data
- * (AgentProcess → WidgetItem) and the activity excerpt.
+ * One line per sub-agent of this conversation, live or finished, below the
+ * editor: `⠋ @jude  label  12s  bash: ls -la`. Clicking a line (fullscreen
+ * mouse mode) opens that agent's view; `/agents` is the keyboard path.
  *
- * Tracked: background agents (direct or nested under a background ancestor)
- * and persistent foreground agents. A foreground card's whole subtree is
- * folded into that card's meta counters instead — one subtree, one surface.
+ * The list renders the Roster. AgentWidget is also the adapter the registry
+ * and tree telemetry write through (add / addNested / remove / setStatus /
+ * updateActivity) — a removed agent keeps its row with a terminal status
+ * instead of disappearing.
  */
 
-import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionUIContext, Theme } from "@earendil-works/pi-coding-agent";
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { AgentProcess } from "./agent-process.js";
 import type { AgentActivity } from "./event-interpret.js";
+import { isTerminal, type Roster, type RosterActivity, type RosterEntry, type RosterStatus } from "./roster.js";
+import { formatDuration, SPINNER_TICK_MS, Spinner } from "./ui/spinner.js";
+import { type TickerHandle, ticker } from "./ui/ticker.js";
 import type { WidgetResult, WidgetRow, WidgetStatus } from "./ui/widget.js";
-import { StatusWidget } from "./ui/widget.js";
-import { agentTitle } from "./views.js";
+import { atId } from "./views.js";
+
+const WIDGET_KEY = "pi-subagents-list";
+/** Agent lines shown before the rest fold into a `+N more` line. */
+const MAX_LINES = 8;
+
+interface MouseEventLite {
+	type: string;
+	button: string;
+	y: number;
+	screenY?: number;
+}
+
+/** One SGR mouse report (`ESC [ < b ; x ; y M|m`); group 1 = the 1-based row. */
+const SGR_MOUSE = /\x1b\[<\d+;\d+;(\d+)[Mm]/g;
 
 export class AgentWidget {
-	private readonly widget: StatusWidget;
-	/** Nested-row parent links (childId → parentId). A dead parent can never
-	 *  report its children's removal, so the surface that owns the rows drops
-	 *  the subtree with it — otherwise a stopped agent leaves spinners behind. */
-	private readonly parentOf = new Map<string, string>();
+	private registered = false;
+	private tui: { requestRender(): void } | undefined;
+	private animation: TickerHandle | undefined;
+	private readonly spinner = new Spinner();
+	/** Rendered line index → agent id (click targets of the last render). */
+	private lineAgents: (string | undefined)[] = [];
+	private readonly unsubscribe: () => void;
+	/** Agent line under the pointer (fullscreen mode reports pointer motion). */
+	private hovered: string | undefined;
+	/** Where the list sat on screen at the last pointer event it received. */
+	private screenTop: number | undefined;
+	private readonly unsubscribeInput: () => void;
 
-	constructor(ui: ExtensionUIContext) {
-		// Widget title marks the strip as the Agent plugin's background tasks
-		// (v1.2.0 style) so users recognize it at a glance.
-		this.widget = new StatusWidget(ui, "Agents");
+	constructor(
+		private readonly ui: ExtensionUIContext,
+		private readonly roster: Roster,
+		private readonly onOpen: (agentId: string) => void,
+	) {
+		this.unsubscribe = roster.onChange(() => this.reconcile());
+		// pi has no pointer-leave event: watch raw mouse reports and drop the
+		// hover once the pointer is outside the rows the list occupies.
+		this.unsubscribeInput =
+			typeof ui.onTerminalInput === "function" ? ui.onTerminalInput((data) => this.watchPointer(data)) : () => {};
+		this.reconcile();
 	}
 
-	/** Track an agent row. `status` is the row's lifecycle state at
-	 * registration — the caller knows it (background settle = running,
-	 * foreground resident = idle). Never derived from agent.status: at
-	 * resident time the process is already "completed", and a terminal row
-	 * status is removed by the widget's terminal cleanup on the spot.
-	 * No-op when the row is already present. */
+	/** Track a local agent (background, resident, or revived). */
 	add(agent: AgentProcess, status: "running" | "idle" = "running"): void {
-		this.widget.add({
-			id: agent.agentId,
-			title: agentTitle(agent.agentId, agent.label),
+		this.roster.upsert({
+			agentId: agent.agentId,
+			label: agent.label,
 			startedAt: agent.startedAt,
 			status,
-			rows: activityToRows(agent.getLatestActivity()),
+			sessionPath: agent.sessionPath,
+			model: agent.model,
+			indent: 0,
 		});
 	}
 
-	/** Track a nested agent (tree telemetry from a descendant's own spawns):
-	 *  pure data — no local AgentProcess behind the row. */
+	/** Track a nested agent (tree telemetry from a descendant's own spawns). */
 	addNested(agent: {
 		agentId: string;
 		label: string;
 		startedAt: number;
 		indent: number;
 		status: "running" | "idle";
-		/** Direct parent's agent id — absent when the reporter predates the field. */
 		parentId?: string;
 	}): void {
-		this.widget.add({
-			id: agent.agentId,
-			title: agentTitle(agent.agentId, agent.label),
-			startedAt: agent.startedAt,
-			status: agent.status === "idle" ? "idle" : "running",
-			indent: agent.indent,
-		});
-		if (agent.parentId) this.parentOf.set(agent.agentId, agent.parentId);
+		this.roster.upsert({ ...agent });
 	}
 
-	/** Stop tracking; the end result feeds the lifetime progress meta. Removing
-	 *  a row also removes every row nested under it, at any depth: nothing will
-	 *  ever report their removal (their reporter is the process that died), and
-	 *  by construction each of them was still live when its ancestor went away
-	 *  — so they were stopped, never done. */
+	/** The agent ended: its row stays, with the terminal status. */
 	remove(agentId: string, result?: WidgetResult): void {
-		this.widget.remove(agentId, result);
-		this.parentOf.delete(agentId);
-		for (const [id, parent] of [...this.parentOf]) {
-			if (parent === agentId) this.remove(id, "stopped");
-		}
+		this.roster.setStatus(agentId, result ?? "stopped");
 	}
 
-	/** Update one row's status in place (idle ⇄ running for persistent agents). */
 	setStatus(agentId: string, status: WidgetStatus): void {
-		this.widget.updateStatus(agentId, status);
+		this.roster.setStatus(agentId, status);
 	}
 
-	/** Update one row's live working output (activity excerpt). */
 	updateActivity(agentId: string, activity: AgentActivity | undefined): void {
-		this.widget.updateRows(agentId, activityToRows(activity));
+		this.roster.setActivity(agentId, activityToRows(activity)[0]);
 	}
 
-	/** Clear everything (session shutdown). */
+	/** Unregister the widget (session shutdown). The roster is owned by the caller. */
 	dispose(): void {
-		this.parentOf.clear();
-		this.widget.dispose();
+		this.unsubscribe();
+		this.unsubscribeInput();
+		this.stopAnimation();
+		if (this.registered) this.ui.setWidget(WIDGET_KEY, undefined);
+		this.registered = false;
+		this.tui = undefined;
+	}
+
+	// ── Internal ───────────────────────────────────────────
+
+	private reconcile(): void {
+		const entries = this.roster.list();
+		if (entries.length === 0) {
+			this.stopAnimation();
+			if (this.registered) this.ui.setWidget(WIDGET_KEY, undefined);
+			this.registered = false;
+			return;
+		}
+		this.register();
+		// The clock runs only while something is running (spinner + elapsed).
+		if (entries.some((e) => e.status === "running")) {
+			this.animation ??= ticker.subscribe(() => this.tui?.requestRender(), SPINNER_TICK_MS);
+		} else {
+			this.stopAnimation();
+		}
+		this.tui?.requestRender();
+	}
+
+	private stopAnimation(): void {
+		this.animation?.unsubscribe();
+		this.animation = undefined;
+	}
+
+	private register(): void {
+		if (this.registered) return;
+		this.ui.setWidget(
+			WIDGET_KEY,
+			(tui, theme) => {
+				this.tui = tui as { requestRender(): void };
+				return {
+					render: (width: number) => this.render(theme, width),
+					invalidate: () => {},
+					handleMouse: (event: MouseEventLite) => this.handleMouse(event),
+				};
+			},
+			{ placement: "belowEditor" },
+		);
+		this.registered = true;
+	}
+
+	private handleMouse(event: MouseEventLite): { handled: boolean } | undefined {
+		const agentId = this.lineAgents[event.y];
+		if (event.screenY !== undefined) this.screenTop = event.screenY - event.y;
+		if (event.type === "move") {
+			this.setHovered(agentId);
+			return undefined; // motion stays available to the renderer
+		}
+		if (event.type !== "click" || event.button !== "left" || !agentId) return undefined;
+		this.setHovered(undefined);
+		this.onOpen(agentId);
+		return { handled: true };
+	}
+
+	private setHovered(agentId: string | undefined): void {
+		if (agentId === this.hovered) return;
+		this.hovered = agentId;
+		this.tui?.requestRender();
+	}
+
+	private watchPointer(data: string): undefined {
+		if (this.hovered === undefined || this.screenTop === undefined) return undefined;
+		for (const match of data.matchAll(SGR_MOUSE)) {
+			const row = Number(match[1]) - 1;
+			if (row < this.screenTop || row >= this.screenTop + this.lineAgents.length) this.setHovered(undefined);
+		}
+		return undefined;
+	}
+
+	private render(theme: Theme, width: number): string[] {
+		const { shown, hidden } = pickVisible(this.roster.list(), MAX_LINES);
+		const idWidth = Math.max(...shown.map((e) => visibleWidth(atId(e.agentId))));
+		const lines: string[] = [];
+		this.lineAgents = [];
+		for (const entry of shown) {
+			const hovered = entry.agentId === this.hovered;
+			lines.push(renderAgentLine(entry, theme, this.spinner, idWidth, width, hovered));
+			this.lineAgents.push(entry.indent === 0 || entry.sessionPath ? entry.agentId : undefined);
+		}
+		const tail = hidden > 0 ? `… +${hidden} more · /agents` : "点击进入 · /agents";
+		lines.push(truncateToWidth(theme.fg("dim", ` ${tail}`), width, ""));
+		this.lineAgents.push(undefined);
+		return lines;
 	}
 }
 
-/** Map the latest activity to structured widget rows (pure data, not
- *  formatted). Width is unknown here — the widget render layer clips to the
- *  terminal width (width-aware tail truncation). Tool args are flattened to
- *  one line at this layer; text activity is passed through as-is (its
- *  newlines are flattened by clipTail at render time — both paths keep the
- *  zero-width-\n over-wide collapse impossible). */
+/** Which entries get a line: all of them when they fit; otherwise live agents
+ *  first, then the most recently finished — shown in spawn order. */
+export function pickVisible(entries: RosterEntry[], max: number): { shown: RosterEntry[]; hidden: number } {
+	if (entries.length <= max) return { shown: entries, hidden: 0 };
+	const live = entries.filter((e) => !isTerminal(e.status));
+	const finished = entries.filter((e) => isTerminal(e.status)).sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0));
+	const keep = new Set([...live, ...finished].slice(0, max));
+	return { shown: entries.filter((e) => keep.has(e)), hidden: entries.length - keep.size };
+}
+
+const STATUS_ICON: Record<
+	RosterStatus,
+	{ glyph: string; color: "accent" | "muted" | "success" | "error" | "warning" }
+> = {
+	running: { glyph: "", color: "accent" },
+	idle: { glyph: "‖", color: "muted" },
+	done: { glyph: "✓", color: "success" },
+	failed: { glyph: "✗", color: "error" },
+	stopped: { glyph: "■", color: "warning" },
+};
+
+function statusMeta(entry: RosterEntry): string {
+	switch (entry.status) {
+		case "running":
+			return formatDuration(Date.now() - entry.startedAt);
+		case "done":
+			return entry.endedAt && entry.startedAt ? formatDuration(entry.endedAt - entry.startedAt) : "done";
+		default:
+			return entry.status;
+	}
+}
+
+/** `<indent> ⠋ @id  label  meta  activity` — always exactly fits `width`.
+ *  A hovered line gets a `▸` marker, an underlined label and the selection
+ *  background across the full width. */
+export function renderAgentLine(
+	entry: RosterEntry,
+	theme: Theme,
+	spinner: Spinner,
+	idWidth: number,
+	width: number,
+	hovered = false,
+): string {
+	const line = plainAgentLine(entry, theme, spinner, idWidth, width, hovered);
+	return hovered ? withBackground(line, width, theme) : line;
+}
+
+function plainAgentLine(
+	entry: RosterEntry,
+	theme: Theme,
+	spinner: Spinner,
+	idWidth: number,
+	width: number,
+	hovered: boolean,
+): string {
+	const icon = STATUS_ICON[entry.status];
+	const glyph = entry.status === "running" ? spinner.current() : icon.glyph;
+	const id = atId(entry.agentId);
+	const marker = hovered ? theme.fg("accent", "\u25b8") : " ";
+	const prefix = `${"  ".repeat(entry.indent)}${marker}${theme.fg(icon.color, glyph)} ${theme.fg("accent", id)}${" ".repeat(Math.max(0, idWidth - visibleWidth(id)))}  `;
+	const meta = statusMeta(entry);
+	const metaStyled = theme.fg(entry.status === "failed" ? "error" : "muted", meta);
+	let room = width - visibleWidth(prefix) - visibleWidth(meta) - 2;
+	if (room < 4) return truncateToWidth(prefix + metaStyled, width, "");
+
+	const activity = entry.activity ? flatten(entry.activity.content) : "";
+	// The label gets what it needs up to half the room when an activity
+	// excerpt competes for it, and all of it otherwise.
+	const labelRoom = activity ? Math.max(8, Math.min(visibleWidth(entry.label), Math.floor(room / 2))) : room;
+	const label = truncateToWidth(flatten(entry.label), labelRoom, "…");
+	const labelPad = " ".repeat(Math.max(0, Math.min(visibleWidth(entry.label), labelRoom) - visibleWidth(label)));
+	const labelStyled = theme.fg("bashMode", hovered ? theme.underline(label) : label);
+	let line = `${prefix}${labelStyled}${labelPad}  ${metaStyled}`;
+	room -= visibleWidth(label) + visibleWidth(labelPad);
+	if (activity && room > 6) {
+		// Keep the tail of streamed text (the newest words), the head of a tool call.
+		const text =
+			entry.activity?.style === "text" && visibleWidth(activity) > room - 2
+				? `…${activity.slice(-(room - 3))}`
+				: activity;
+		line += `  ${theme.fg(entry.activity?.style === "thinking" ? "thinkingText" : "dim", truncateToWidth(text, room - 2, "…"))}`;
+	}
+	return truncateToWidth(line, width, "");
+}
+
+/** Paint the selection background across the whole line. Styled segments end
+ *  in full resets, so the background is reopened after each one. */
+function withBackground(line: string, width: number, theme: Theme): string {
+	const open = theme.bg("selectedBg", "\u0000").split("\u0000")[0] ?? "";
+	const padded = truncateToWidth(line, width, "", true);
+	return `${open}${padded.replaceAll("\x1b[0m", `\x1b[0m${open}`)}\x1b[0m`;
+}
+
+function flatten(text: string): string {
+	return text.replace(/\s+/g, " ").trim();
+}
+
+/** Map the latest activity to structured rows (pure data, not formatted).
+ *  Tool args are flattened to one line; streamed text passes through. */
 export function activityToRows(activity: AgentActivity | undefined): WidgetRow[] {
 	if (!activity) return [];
 	if (activity.kind === "thinking") return [{ style: "thinking", content: "Thinking..." }];
-	// Tool args can carry multi-line payloads (e.g. write) — flatten newlines
-	// into a single excerpt line (tail truncation happens at render time).
 	if (activity.kind === "tool")
 		return [{ style: "tool", content: `${activity.name}: ${activity.args.replace(/\s+/g, " ")}` }];
 	return [{ style: "text", content: activity.text }];
 }
+
+export type { RosterActivity };

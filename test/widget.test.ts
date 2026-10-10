@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { AgentWidget, activityToRows } from "../widget.js";
+import { visibleWidth } from "@earendil-works/pi-tui";
+import { Roster } from "../roster.js";
+import { AgentWidget, activityToRows, pickVisible } from "../widget.js";
 
 describe("activityToRows — pure data (width clipping lives in the widget render layer)", () => {
 	it("maps short tool args to one tool row", () => {
@@ -27,66 +29,181 @@ describe("activityToRows — pure data (width clipping lives in the widget rende
 	});
 });
 
-// ── Removal cascade ──────────────────────────────────────
+// ── Bottom agent list ────────────────────────────────────
 //
-// A sub-agent's descendants are displayed on the root widget as nested rows
-// reported by the sub-agent itself. When that sub-agent is stopped, nothing
-// will ever report their removal (the reporter is the process that died), so
-// the surface that owns the rows must take the whole subtree down with it.
+// Rows persist after an agent ends (with its terminal status); ending an
+// agent also ends its live nested descendants — nothing will report their
+// end, since the reporter was the process that died.
 
-/** Capture the widget's render function through a mock ui.setWidget — the
- *  same seam pi-ui's own widget tests use. */
-const theme = { fg: (_c: string, s: string) => s, bold: (s: string) => s, italic: (s: string) => s } as never;
+/** Capture the widget's component through a mock ui.setWidget. */
+const theme = {
+	fg: (_c: string, s: string) => s,
+	bg: (_c: string, s: string) => `<bg>${s}`,
+	bold: (s: string) => s,
+	italic: (s: string) => s,
+	underline: (s: string) => `_${s}_`,
+} as never;
 
 function capture() {
-	let render: ((width?: number) => string[]) | undefined;
+	let component: { render(width: number): string[]; handleMouse?(e: unknown): unknown } | undefined;
+	let placement: string | undefined;
+	let input: ((data: string) => unknown) | undefined;
 	const ui = {
-		setWidget: (_key: string, widget: unknown) => {
-			render =
+		onTerminalInput: (handler: (data: string) => unknown) => {
+			input = handler;
+			return () => {};
+		},
+		setWidget: (_key: string, widget: unknown, opts?: { placement?: string }) => {
+			placement = opts?.placement;
+			component =
 				typeof widget === "function"
-					? (widget as (tui: unknown, th: unknown) => { render(width?: number): string[] })(
-							{ requestRender: () => {} },
-							theme,
-						).render
+					? (widget as (tui: unknown, th: unknown) => typeof component)({ requestRender: () => {} }, theme)
 					: undefined;
 		},
 	} as never;
-	return { ui, lines: () => (render?.() ?? []).join("\n") };
+	return {
+		ui,
+		lines: (width = 100) => component?.render(width) ?? [],
+		click: (y: number) => component?.handleMouse?.({ type: "click", button: "left", y }),
+		/** Pointer motion over line `y` of a list whose top sits on screen row `top` (0-based). */
+		move: (y: number, top = 30) => component?.handleMouse?.({ type: "move", button: "none", y, screenY: top + y }),
+		/** A raw SGR motion report at 0-based screen row `row`. */
+		rawMove: (row: number) => input?.(`\x1b[<35;10;${row + 1}M`),
+		placement: () => placement,
+	};
 }
 
 const agentRow = (id: string, label: string) =>
-	({ agentId: id, label, startedAt: 0, getLatestActivity: () => undefined }) as never;
+	({ agentId: id, label, startedAt: Date.now(), getLatestActivity: () => undefined }) as never;
 
-describe("AgentWidget — a removed row takes its subtree with it", () => {
-	it("removing a parent drops its nested descendants (no orphan spinner)", () => {
-		const { ui, lines } = capture();
-		const w = new AgentWidget(ui);
-		w.add(agentRow("a", "Alpha"));
-		w.addNested({ agentId: "b", label: "Bravo", startedAt: 0, indent: 1, status: "running", parentId: "a" });
-		w.addNested({ agentId: "c", label: "Charlie", startedAt: 0, indent: 2, status: "running", parentId: "b" });
-		w.add(agentRow("z", "Zulu")); // unrelated row keeps the widget alive
-		assert.match(lines(), /Bravo[\s\S]*Charlie/);
-
-		w.remove("a", "stopped");
-
-		const after = lines();
-		assert.doesNotMatch(after, /Bravo|Charlie/, "the subtree must not outlive its parent's row");
-		assert.match(after, /Zulu/, "unrelated rows stay");
+describe("AgentWidget — the bottom agent list", () => {
+	it("renders below the editor, one line per agent plus a hint line", () => {
+		const { ui, lines, placement } = capture();
+		const w = new AgentWidget(ui, new Roster(), () => {});
+		w.add(agentRow("jude", "read-only check"));
+		w.add(agentRow("max", "auth module"));
+		assert.equal(placement(), "belowEditor");
+		const out = lines();
+		assert.equal(out.length, 3);
+		assert.match(out[0], /@jude\s+read-only check/);
+		assert.match(out[1], /@max\s+auth module/);
+		assert.match(out[2], /\/agents/);
 		w.dispose();
 	});
 
-	it("removing a nested row drops only its own subtree", () => {
+	it("keeps a finished agent's row with its status instead of removing it", () => {
 		const { ui, lines } = capture();
-		const w = new AgentWidget(ui);
+		const roster = new Roster();
+		const w = new AgentWidget(ui, roster, () => {});
+		w.add(agentRow("jude", "check"));
+		w.remove("jude", "failed");
+		assert.equal(roster.get("jude")?.status, "failed");
+		assert.match(lines()[0], /\u2717 @jude\s+check\s+failed/);
+		w.dispose();
+	});
+
+	it("ending a parent ends its live nested descendants (no orphan spinner)", () => {
+		const { ui } = capture();
+		const roster = new Roster();
+		const w = new AgentWidget(ui, roster, () => {});
 		w.add(agentRow("a", "Alpha"));
 		w.addNested({ agentId: "b", label: "Bravo", startedAt: 0, indent: 1, status: "running", parentId: "a" });
 		w.addNested({ agentId: "c", label: "Charlie", startedAt: 0, indent: 2, status: "running", parentId: "b" });
+		w.add(agentRow("z", "Zulu"));
 
-		w.remove("b", "done");
+		w.remove("a", "done");
 
-		const after = lines();
-		assert.doesNotMatch(after, /Bravo|Charlie/);
-		assert.match(after, /Alpha/, "the parent survives its child's removal");
+		assert.equal(roster.get("a")?.status, "done");
+		assert.equal(roster.get("b")?.status, "stopped");
+		assert.equal(roster.get("c")?.status, "stopped");
+		assert.equal(roster.get("z")?.status, "running", "unrelated rows stay live");
+		w.dispose();
+	});
+
+	it("a click on an agent line opens that agent; the hint line opens nothing", () => {
+		const { ui, lines, click } = capture();
+		const opened: string[] = [];
+		const w = new AgentWidget(ui, new Roster(), (id) => opened.push(id));
+		w.add(agentRow("jude", "one"));
+		w.add(agentRow("max", "two"));
+		lines(); // a render maps lines to agents
+		assert.deepEqual(click(1), { handled: true });
+		assert.equal(click(2), undefined);
+		assert.deepEqual(opened, ["max"]);
+		w.dispose();
+	});
+
+	it("every line fits the width, CJK labels included", () => {
+		const { ui, lines } = capture();
+		const w = new AgentWidget(ui, new Roster(), () => {});
+		w.add(agentRow("jude", "后台只读目录检查，确认没有修改任何文件并返回第一层条目".repeat(2)));
+		w.updateActivity("jude", { kind: "tool", name: "bash", args: "ls -la /home/user/projects/pi_development" });
+		for (const width of [30, 60, 100]) {
+			for (const line of lines(width)) {
+				assert.ok(visibleWidth(line) <= width, `line wider than ${width}: ${line}`);
+			}
+		}
+		w.dispose();
+	});
+});
+
+describe("pickVisible — which agents get a line when there are too many", () => {
+	const entry = (agentId: string, status: string, endedAt?: number) =>
+		({ agentId, label: agentId, status, startedAt: 0, endedAt, indent: 0 }) as never;
+
+	it("shows everything when it fits", () => {
+		const all = [entry("a", "done", 1), entry("b", "running")];
+		assert.deepEqual(pickVisible(all, 8), { shown: all, hidden: 0 });
+	});
+
+	it("keeps live agents, then the most recently finished, in spawn order", () => {
+		const all = [entry("a", "done", 1), entry("b", "running"), entry("c", "done", 3), entry("d", "failed", 2)];
+		const { shown, hidden } = pickVisible(all, 3);
+		assert.deepEqual(
+			shown.map((e: { agentId: string }) => e.agentId),
+			["b", "c", "d"],
+		);
+		assert.equal(hidden, 1);
+	});
+});
+
+describe("AgentWidget — hover feedback", () => {
+	it("highlights the agent line under the pointer and leaves the others alone", () => {
+		const { ui, lines, move } = capture();
+		const w = new AgentWidget(ui, new Roster(), () => {});
+		w.add(agentRow("jude", "one"));
+		w.add(agentRow("max", "two"));
+		lines();
+		move(1);
+		const out = lines();
+		assert.match(out[1], /\u25b8/, "hovered line gets the marker");
+		assert.match(out[1], /_two_/, "hovered label is underlined");
+		assert.match(out[1], /<bg>/, "hovered line gets the selection background");
+		assert.doesNotMatch(out[0], /\u25b8|_one_|<bg>/);
+		w.dispose();
+	});
+
+	it("drops the highlight when the pointer leaves the list, keeps it while inside", () => {
+		const { ui, lines, move, rawMove } = capture();
+		const w = new AgentWidget(ui, new Roster(), () => {});
+		w.add(agentRow("jude", "one"));
+		lines();
+		move(0, 30); // list occupies screen rows 30..31 (agent line + hint)
+		rawMove(31);
+		assert.match(lines()[0], /\u25b8/, "still inside the list");
+		rawMove(12);
+		assert.doesNotMatch(lines()[0], /\u25b8/, "outside the list");
+		w.dispose();
+	});
+
+	it("moving onto the hint line clears the highlight", () => {
+		const { ui, lines, move } = capture();
+		const w = new AgentWidget(ui, new Roster(), () => {});
+		w.add(agentRow("jude", "one"));
+		lines();
+		move(0);
+		move(1);
+		assert.doesNotMatch(lines()[0], /\u25b8/);
 		w.dispose();
 	});
 });
