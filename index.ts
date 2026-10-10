@@ -46,6 +46,7 @@ import {
 import { Type } from "typebox";
 import { AgentProcess } from "./agent-process.js";
 import { AgentView } from "./agent-view.js";
+import { canSpawnAt, envInt, loadConfig } from "./config.js";
 import { type AgentActivity, type AgentTreeEvent, MSG_STATUS_KEY, TREE_STATUS_KEY } from "./event-interpret.js";
 import { createLiveChannels } from "./live-output.js";
 import { resolveModel } from "./model.js";
@@ -90,6 +91,8 @@ const SUBAGENT_SESSION_DIR = resolveSubagentSessionDir();
 const MY_AGENT_ID = process.env.PI_SUBAGENT_AGENT_ID ?? "";
 /** I am a child agent when an identity was injected (root children get "a1"…). */
 const HAS_PARENT = MY_AGENT_ID !== "";
+/** Levels below the main session (0 = the main session), injected by the parent. */
+const MY_DEPTH = envInt(process.env.PI_SUBAGENT_DEPTH) ?? (HAS_PARENT ? 1 : 0);
 
 /** Every sub-agent of this conversation, live or finished. */
 const roster = new Roster();
@@ -433,6 +436,20 @@ function transcriptEnabledAgentTools(ctx: ExtensionContext): boolean {
 // ─── Default export (pi extension entry) ───────────────────────
 
 export default function (pi: ExtensionAPI) {
+	// Spawn depth limit (pi-subagents.json `maxDepth`, default 1: sub-agents
+	// cannot spawn). The main session's limit travels down the tree; at the
+	// limit this process registers no agent tools at all — no schema, no
+	// guidelines, nothing to enable.
+	const { config, warnings: configWarnings } = loadConfig();
+	const maxDepth = envInt(process.env.PI_SUBAGENT_MAX_DEPTH) ?? config.maxDepth;
+	const canSpawn = canSpawnAt(MY_DEPTH, maxDepth);
+	const registerTool: ExtensionAPI["registerTool"] = canSpawn ? pi.registerTool.bind(pi) : () => {};
+	/** Identity and depth for a child process. */
+	const childEnv = (agentId: string): NodeJS.ProcessEnv => ({
+		PI_SUBAGENT_AGENT_ID: agentId,
+		PI_SUBAGENT_DEPTH: String(MY_DEPTH + 1),
+		PI_SUBAGENT_MAX_DEPTH: String(maxDepth),
+	});
 
 	// pi's agent-core drops the execute() isError flag when a tool returns
 	// normally (bash gets its error background by throwing instead) — see
@@ -492,7 +509,7 @@ export default function (pi: ExtensionAPI) {
 	// parameterless loader activates them on demand (same pattern as
 	// web_enable / session_hub_enable). The activation is recorded in the
 	// transcript, so a resumed session keeps the tools.
-	pi.registerTool({
+	registerTool({
 		name: ENABLE_TOOL_NAME,
 		label: "Enable Sub-agents",
 		description:
@@ -520,7 +537,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// ── agent_spawn ────────────────────────────────────
-	pi.registerTool({
+	registerTool({
 		name: "agent_spawn",
 		label: "Agent Spawn",
 		defaultActive: false,
@@ -689,9 +706,7 @@ export default function (pi: ExtensionAPI) {
 				persistent: params.persistent ?? !HAS_PARENT,
 				// Identity for in-tree messaging: PI_SUBAGENT_AGENT_ID marks this
 				// process as a child (agent_send is registered on every instance).
-				env: {
-					PI_SUBAGENT_AGENT_ID: agentId,
-				},
+				env: childEnv(agentId),
 				// Child→parent messages re-enter the router on this hop. Tree telemetry
 				// from deeper spawns forwards up (depth + 1) or lands on the root widget.
 				onMessage: onChildMessage,
@@ -953,7 +968,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// ── agent_stop ───────────────────────────────────────
-	pi.registerTool({
+	registerTool({
 		name: "agent_stop",
 		label: "Stop Agent",
 		defaultActive: false,
@@ -1025,7 +1040,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// ── agent_send ──────────────────────────────────────
-	pi.registerTool({
+	registerTool({
 		name: "agent_send",
 		label: "Send Message",
 		defaultActive: false,
@@ -1166,7 +1181,7 @@ export default function (pi: ExtensionAPI) {
 			tools: entry.tools,
 			persistent: true,
 			resumeSession: entry.sessionPath,
-			env: { PI_SUBAGENT_AGENT_ID: agentId },
+			env: childEnv(agentId),
 			onMessage: onChildMessage,
 			onTreeEvent: (event) => subtree.onTreeEvent(event),
 			onIdle: (outcome) => {
@@ -1293,6 +1308,7 @@ export default function (pi: ExtensionAPI) {
 	// tools gets them back: pi rebuilds the active set from registration
 	// defaults, which would otherwise record their removal on the next turn.
 	const restoreAgentTools = (ctx: ExtensionContext): void => {
+		if (!canSpawn) return;
 		try {
 			if (!transcriptEnabledAgentTools(ctx)) return;
 			pi.setActiveTools([...new Set([...pi.getActiveTools(), ...SUBAGENT_TOOL_NAMES])]);
@@ -1331,6 +1347,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", (_event, ctx) => {
 		restoreAgentTools(ctx);
 		rebuildRoster(ctx);
+		if (ctx.mode === "tui") for (const warning of configWarnings) ctx.ui.notify(`pi-subagents: ${warning}`, "warning");
 	});
 	pi.on("session_tree", (_event, ctx) => restoreAgentTools(ctx));
 

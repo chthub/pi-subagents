@@ -27,7 +27,7 @@ Pi 没有内置 sub-agent。于是重活、并行的活、吃上下文的活，�
 - **继承或覆盖** — 子 agent 默认继承你的模型与推理强度，也可逐个覆盖。便宜模型做侦察，强模型做实现。
 - **无隐藏限制** — 默认无 token 上限、无超时、无并发上限。需要时用可选 `timeoutMs` 加一道护栏。
 - **可复盘** — 每个会话持久化、永不删除；任何结果都能 `pi --session <path>` 回看。
-- **可嵌套** — 子 agent 是完整 pi 实例，天然能再 spawn 孙 agent。
+- **按需嵌套** — 默认子代理不能再派子代理；在配置文件里调高 `maxDepth` 才允许。
 - **Token 经济** — 系统侧保持克制：
   - **系统提示** — 三个工具 + 简短指南，注入约 2–3KB 系统提示（token 数随 tokenizer 略有出入）。
   - **通知** — LLM 只看到最小结构化数据；装饰（label、用量）留在渲染层，永不进入 LLM 上下文。
@@ -112,6 +112,20 @@ Pi 调用 `agent_send` 向运行中的 agent 注入重定向消息（当前 turn
 
 ## 配置
 
+### 配置文件
+
+`<agentDir>/pi-subagents.json`（默认 `~/.pi/agent/pi-subagents.json`，跟随 `PI_CODING_AGENT_DIR`），也可以用 `PI_SUBAGENT_CONFIG` 指定路径。可选；启动和 `/reload` 时读取。
+
+```json
+{ "maxDepth": 1 }
+```
+
+| 键 | 默认 | 含义 |
+|---|---|---|
+| `maxDepth` | `1` | 主会话之下允许几层子代理。`1`：主会话能派子代理，子代理不能再派。`2`：子代理还能再派一层。以主会话的值为准，整棵树生效；到达上限的子代理不注册任何子代理工具。 |
+
+值不合法时退回默认值，并在 TUI 里提示。
+
 ### 环境变量
 
 | 变量 | 默认值 | 含义 |
@@ -184,6 +198,8 @@ LLM 通过 `promptSnippet` + `promptGuidelines`（系统提示注入）获得使
 - **Graceful turn limits（默认不限，opt-in）** — 不设隐藏 deadline：子 agent 一直跑到完成或被停，除非你传 `timeoutMs`。不做 token 限制——用量仅通知卡统计。
 
 ## 嵌套 sub-agent
+
+默认关闭（`maxDepth: 1`）。调高 `maxDepth` 之后：
 
 子 agent 是完整 pi 实例——全局安装本扩展后，它天然能再 spawn 子 agent。每一层都是独立进程、独立上下文；深度倍增启动时间与 token 成本。是否值得，由你（或模型）判断。
 

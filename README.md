@@ -27,7 +27,7 @@ Pi has no built‑in sub‑agents. So heavy, parallel, or context‑heavy work c
 - **Inherit or override** — a child inherits your model and thinking level by default; override it per child. A cheap model for recon, a strong one for the build.
 - **No hidden limits** — no token ceiling, no deadline, no concurrency cap by default. An optional `timeoutMs` adds a guardrail when you want one.
 - **Reviewable** — every session persists and is never deleted; attach any result with `pi --session <path>`.
-- **Nestable** — a child is a full pi instance, so it can spawn another child.
+- **Nesting on request** — sub-agents cannot spawn by default; raise `maxDepth` in the config file to allow it.
 - **Token economy** — the system side stays lean:
   - **System prompt** — three tools and terse guidance inject roughly 2–3KB of system prompt (token count drifts with the tokenizer).
   - **Notification** — the LLM sees only minimal structured data; decoration (label, usage) stays in the render layer.
@@ -112,6 +112,20 @@ Below the editor, one line per sub-agent of this conversation — running, idle,
 
 ## Configuration
 
+### Config file
+
+`<agentDir>/pi-subagents.json` (`~/.pi/agent/pi-subagents.json` unless `PI_CODING_AGENT_DIR` moves it), or the path in `PI_SUBAGENT_CONFIG`. Optional; read at startup and on `/reload`.
+
+```json
+{ "maxDepth": 1 }
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `maxDepth` | `1` | Levels of agents allowed below the main session. `1`: the main session spawns sub-agents, sub-agents cannot spawn. `2`: sub-agents may spawn one more level. The main session's value applies to the whole tree; an agent at the limit gets no agent tools at all. |
+
+An invalid value falls back to its default, with a warning in the TUI.
+
 ### Environment variables
 
 | Variable | Default | Meaning |
@@ -186,6 +200,8 @@ Every sub‑agent is a resident `pi --mode rpc` child with a persisted session:
 - **Graceful turn limits (opt‑in)** — no hidden deadline: a sub‑agent runs until it finishes or is stopped unless you pass `timeoutMs`. No abrupt SIGTERM. No token limits — usage is only reported on the notification card.
 
 ## Nested sub‑agents
+
+Off by default (`maxDepth: 1`). With a higher `maxDepth`:
 
 A child is a full pi instance — so if you installed this extension globally, it spawns children of its own. Each level is its own process with its own context; depth multiplies startup time and token cost. You — or the model — judge when it's worth it.
 
