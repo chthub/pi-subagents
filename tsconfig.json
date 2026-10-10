@@ -1,0 +1,20 @@
+{
+	"compilerOptions": {
+		"target": "ES2022",
+		"module": "ESNext",
+		"moduleResolution": "bundler",
+		"lib": ["ES2022"],
+		// Packages publish raw .ts (files: ["*.ts"]), never compiled — so there
+		// is no build output. noEmit must stay true: it also legalizes
+		// allowImportingTsExtensions (the .js specifiers resolve to .ts sources).
+		"allowImportingTsExtensions": true,
+		"noEmit": true,
+		"strict": true,
+		"esModuleInterop": true,
+		"skipLibCheck": true,
+		"forceConsistentCasingInFileNames": true,
+		"resolveJsonModule": true
+	},
+	"include": ["packages/**/*.ts"],
+	"exclude": ["node_modules"]
+}
