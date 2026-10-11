@@ -1,7 +1,7 @@
 /**
  * pi-subagent — subtree display: where a child's telemetry lands.
  *
- * The 显示面统一规则 (SPEC) as one module. Given the anchor facts (am I the
+ * The single-display rule (SPEC) as one module. Given the anchor facts (am I the
  * root? is this child foreground? is my card still open?), every tree
  * event resolves to exactly one surface:
  *   - fold   → this card's nested counters (one subtree, one surface)

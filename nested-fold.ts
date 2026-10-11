@@ -61,8 +61,8 @@ export function createNestedFold() {
 	};
 }
 
-/** Where a tree-telemetry event lands — the 显示面统一规则 anchor, as a
- *  decision table (SPEC: 显示面统一规则):
+/** Where a tree-telemetry event lands — the single-display rule anchor, as a
+ *  decision table (SPEC: single-display rule):
  *  - "forward": non-root — report verbatim (depth + 1) to my parent;
  *  - "fold": root + my foreground child while its card is open — the whole
  *    subtree folds into THIS card's meta counters (one subtree, one surface);

@@ -442,7 +442,7 @@ export class AgentView implements Component, Focusable {
 		const meta = [elapsed, entry?.model, entry?.tools?.length ? `tools: ${entry.tools.join(", ")}` : undefined]
 			.filter(Boolean)
 			.join(" · ");
-		const back = t.fg("dim", "Esc 返回主对话");
+		const back = t.fg("dim", "Esc Back to main conversation");
 		const title = ` ${glyph} ${t.fg("accent", t.bold(atId(this.deps.agentId)))} ${t.fg("bashMode", entry?.label ?? "")}  ${t.fg("muted", meta)}`;
 		const gap = Math.max(1, width - visibleWidth(title) - visibleWidth(back) - 1);
 		const line1 =
@@ -457,14 +457,18 @@ export class AgentView implements Component, Focusable {
 		const t = this.theme;
 		const entry = this.deps.entry();
 		const finished = entry ? isTerminal(entry.status) : true;
-		const hint = finished ? "已结束 — 发消息会复活它 · " : "";
-		const keys = "Enter 发送 · PgUp/PgDn 滚动 · Esc 返回";
+		const hint = finished ? "Finished — send a message to resume · " : "";
+		const keys = "Enter Send · PgUp/PgDn Scroll · Esc Back";
 		const notice = this.notice ? `${this.notice} · ` : "";
 		const end = this.contentHeight - this.scroll;
 		const position =
 			this.contentHeight > this.viewport
 				? `${Math.max(1, end - this.viewport + 1)}–${end}/${this.contentHeight} · `
 				: "";
-		return truncateToWidth(t.fg("dim", ` ${position}${notice}${hint}${keys} · 不会通知主 agent`), width, "…");
+		return truncateToWidth(
+			t.fg("dim", ` ${position}${notice}${hint}${keys} · Replies stay in this conversation`),
+			width,
+			"…",
+		);
 	}
 }

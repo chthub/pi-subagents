@@ -68,7 +68,7 @@ describe("RpcClient — UTF-8 framing", () => {
 		try {
 			const response = await client.sendCommand({ type: "split_utf8" } as never);
 			assert.equal(response.success, true);
-			assert.deepEqual(response.data, { file: "路径/文件😀" });
+			assert.deepEqual(response.data, { file: "\u8def\u5f84/\u6587\u4ef6😀" });
 		} finally {
 			await close(client);
 		}

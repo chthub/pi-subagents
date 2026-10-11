@@ -58,7 +58,7 @@ const addAt = (depth: number): Extract<AgentTreeEvent, { op: "add" }> => ({
 	status: "running",
 });
 
-describe("createSubtreeDisplay — 显示面统一规则 full chain", () => {
+describe("createSubtreeDisplay — single-display rule full chain", () => {
 	it("root + open foreground card → folds, refreshes card, never touches widget", () => {
 		const h = harness();
 		h.display.onTreeEvent(addAt(0));

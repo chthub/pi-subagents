@@ -177,7 +177,7 @@ describe("AgentProcess — spawnAndSend", () => {
 			model: "google/gemini-x",
 			tools: ["read", "grep"],
 			label: "explore",
-			sessionDir: "/home/u/.pi/agent/subagent-sessions",
+			sessionDir: "/example/user/.pi/agent/subagent-sessions",
 		});
 		assert.deepEqual(fake.args, [
 			"--model",
@@ -187,7 +187,7 @@ describe("AgentProcess — spawnAndSend", () => {
 			"--name",
 			"explore",
 			"--session-dir",
-			"/home/u/.pi/agent/subagent-sessions",
+			"/example/user/.pi/agent/subagent-sessions",
 		]);
 	});
 
@@ -572,8 +572,12 @@ describe("AgentProcess — persistent / in-tree messages", () => {
 		fake.emitEvent({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "1 2 3" } });
 		fake.emitEvent({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: " 4 5" } });
 
-		assert.deepEqual(deltas, ["1 2 3", " 4 5"], "唤醒轮的增量必须送出来");
-		assert.deepEqual(agent.getLatestActivity(), { kind: "text", text: "1 2 3 4 5" }, "摘要要跟上，widget 才有内容");
+		assert.deepEqual(deltas, ["1 2 3", " 4 5"], "deltas from the resumed turn must be delivered");
+		assert.deepEqual(
+			agent.getLatestActivity(),
+			{ kind: "text", text: "1 2 3 4 5" },
+			"the latest activity must update for the widget",
+		);
 	});
 
 	it("a settle after wake returns the persistent agent to completed (idle)", async () => {

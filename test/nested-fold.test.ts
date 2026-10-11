@@ -64,7 +64,7 @@ describe("createNestedFold", () => {
 	});
 });
 
-describe("resolveTreeAnchor — 显示面统一规则 decision table", () => {
+describe("resolveTreeAnchor — single-display rule decision table", () => {
 	it("non-root always forwards, regardless of edge kind or card state", () => {
 		assert.equal(resolveTreeAnchor({ hasParent: true, foregroundEdge: true, cardClosed: false }), "forward");
 		assert.equal(resolveTreeAnchor({ hasParent: true, foregroundEdge: false, cardClosed: true }), "forward");

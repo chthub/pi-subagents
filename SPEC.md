@@ -1,278 +1,284 @@
-# pi-subagent 规格说明
+# pi-subagent Specification
 
-> 通用设计原则（Pi Native / LLM+Token Friendly / 提供能力 / 极简克制）与统一视觉语法见项目级 [`docs/upstream/root-SPEC.md`](docs/upstream/root-SPEC.md)；本文件只记录 sub-agent 专属设计。
+> Shared design principles (Pi Native, LLM + Token Friendly, primitives rather than solutions, minimalism) and visual conventions live in [`docs/upstream/root-SPEC.md`](docs/upstream/root-SPEC.md). This file records sub-agent-specific design.
 
-## 问题陈述
+## Problem statement
 
-Pi 不支持内置子 agent。当任务会产生大量中间输出（搜索结果、日志、测试输出）污染主会话上下文，或需要并行运行独立任务而不阻塞主对话时，需要一种委托机制：
+Pi has no built-in sub-agents. Delegation is useful when verbose intermediate output (search results, logs, and tests) would crowd the main context, or when independent tasks should run concurrently without blocking the main conversation:
 
-- **上下文隔离**：子任务的中间过程不应进入主上下文。
-- **并行**：多个独立任务可同时进行，主 agent 不被阻塞。
-- **可干预**：运行中的子任务可被消息重定向（agent_send）或终止（agent_stop）。
-- **可观测**：运行状态在 TUI 中可见，完成后可复盘完整会话。
+- **Context isolation**: intermediate child work stays out of the main context.
+- **Parallel execution**: independent tasks can run concurrently without blocking the main agent.
+- **Control**: messages redirect running work (`agent_send`), and `agent_stop` stops it.
+- **Observability**: the TUI shows activity, and saved sessions support later review.
 
-> **并行**由 pi 原生支持：LLM 一次响应中发出多个 tool call 时，pi 并发执行所有调用。subagent 不内置自己的并行机制。
+> Pi provides parallel tool execution: multiple tool calls in one response run concurrently. This extension does not add a worker queue.
 
-## 解决方案
+## Solution
 
-一个 pi 扩展，注册三个动词后缀原语工具（对齐 pi 生态动词风格：`read`/`write`/`edit`/`web_search`；无 action 枚举、家族扩展自然）：
+A Pi extension registers three verb-suffixed primitives, consistent with built-in names such as `read`, `write`, `edit`, and `web_search`. There is no action enum or predefined agent type system:
 
-- **`agent_spawn`** — 创建隔离的子 agent（前台阻塞 / 后台异步；可选 `persistent` 常驻）。
-- **`agent_stop`** — 销毁运行中的子 agent（常驻与否都适用）。
-- **`agent_send`** — 实体间点对点消息投递（直接子 / `@parent`；路由由 LLM 自行完成）。
+- **`agent_spawn`**: create an isolated agent, either foreground or background, with optional persistent residency.
+- **`agent_stop`**: stop a running or resident child process.
+- **`agent_send`**: message a direct child; a child with this tool may also address `@parent`. At the default depth, children have no agent tools, final replies return automatically, and the parent handles coordination.
 
-每个子 agent 是一个常驻 `pi --mode rpc` 子进程，拥有独立上下文与持久化会话。
+Each child is a resident `pi --mode rpc` process with an independent context and a persisted session.
 
-## 用户故事
+## User stories
 
-1. 委托子 agent 研究问题，不污染主会话上下文窗口，输出纯文本直接可用。
-2. 并行探索多个独立问题——多个后台子 agent 同时运行，widget 显示状态，完成通知逐个到达。
-3. 后台 agent 跑偏时发消息重定向，或直接 agent_stop 终止。
-4. 为每个子 agent 独立覆盖模型和工具白名单（如廉价模型做侦察，强模型做实现）。
-5. 子 agent 完成后从主会话（工具卡/通知卡）找到 session 路径，`pi --session <path>` 复盘完整过程。
-6. 嵌套：子 agent 是完整 pi 实例，天然可再 spawn 孙 agent，无深度控制。
-7. 父级退出时子进程经 stdin EOF 自动优雅退出（无孤儿进程）；显示行由显示面按 parent 链级联摘除（无孤儿行）——会话文件永不删除。
-8. 协作：子 agent 中途遇到阻塞（缺信息/需决策），发消息给父会话请求帮助；父回复后子 agent 继续，上下文不丢。
-9. 常驻：`persistent` 子 agent 完成后进程驻留 idle（零 token），之后随时被 `agent_send` 唤醒继续追问，无需重新 spawn。
+1. Delegate research without filling the main context with intermediate output; return a usable text result.
+2. Run independent background tasks concurrently, show their status, and deliver ready results in batches.
+3. Redirect work with `agent_send` or stop incorrect execution with `agent_stop`.
+4. Override the model, thinking level, and tool allowlist per child.
+5. Find a child's session path in its tool or notification card and review it with `pi --session <path>`.
+6. Keep nesting disabled by default (`maxDepth=1`); raise the shared tree depth limit when needed.
+7. On host exit, close child stdin for orderly shutdown without orphan processes; remove descendant display rows together. Never delete saved sessions.
+8. When missing information prevents progress, the child asks a question and ends its reply. The parent receives it automatically and answers with `agent_send`, preserving context.
+9. Keep persistent children idle after completion, with no model tokens consumed; resume them with `agent_send` instead of spawning again.
 
-## UI 设计
+## UI design
 
-### agent_spawn 工具卡片
+### agent_spawn tool card
 
-```
-✓ agent_spawn "检查 CI 配置" (sonnet · high · Took 27.5s · done 2/3 · 1 running)
-⠙ agent_spawn "检查 CI 配置" (claude-sonnet · high · Elapsed 12.3s)
+```text
+✓ agent_spawn "Check CI configuration" (sonnet · high · Took 27.5s · done 2/3 · 1 running)
+⠙ agent_spawn "Check CI configuration" (claude-sonnet · high · Elapsed 12.3s)
 Thinking...
 bash: pnpm check
-<空行>
+<blank line>
 ... (12 earlier lines, ctrl+o to expand)
-<子 agent 输出尾部 5 行>
-<空行>
-session: /path/...jsonl
+<last five lines of child output>
+<blank line>
+session: /path/to/session.jsonl
 ```
 
-- header：`⠋/✓/✗` + `agent_spawn` + `"label"` + muted meta——时间从 state 共享；`run_in_background` 时 renderCall 返回空（后台 spawn 用独立结果卡）；前台卡 meta 尾部追加**嵌套子树汇总段**（`done n/total · n running · …`，与 widget 标题行同词汇，见实现决策「显示面统一规则」）
-- body：混合活动流——prompt 在流头，随后按事件顺序渲染子 agent 会话（Thinking... / 工具调用 / 流式文本）；随输出增长 prompt 与早期活动滚出折叠区
-- footer：仅 `session: <path>`
-- 推理强度：`thinking` 参数（"off"…"max"），省略时继承主会话当前值
+- Header: status icon, `agent_spawn`, quoted label, and muted metadata. Time comes from shared state. Background `renderCall` is empty because background spawn uses a separate result card. Foreground metadata includes nested-subtree counters (`done n/total · n running · …`) using the widget vocabulary; see the single-display rule below.
+- Body: a mixed activity stream starting with the prompt, then thinking, tool calls, and streamed text. Older content leaves the collapsed preview as output grows.
+- Footer: only `session: <path>`.
+- Thinking: the `thinking` parameter accepts `"off"` through `"max"`; omission inherits the dispatching session's level.
 
-**后台 spawn 结果卡**（原地切换）：
+**Background spawn result card**, updated in place:
 
-```
-⠋ agent_spawn "检查 CI 配置" starting…
-✓ agent_spawn "检查 CI 配置" started
-✗ agent_spawn "检查 CI 配置" start failed
+```text
+⠋ agent_spawn "Check CI configuration" starting…
+✓ agent_spawn "Check CI configuration" started
+✗ agent_spawn "Check CI configuration" start failed
   Model not found
 ```
 
-- 状态一眼可辨（icon 前置）；失败原因按统一折叠规则处理（默认尾部预览 + 展开全显，对齐 bash 工具卡）
-- 后台 agent id 只进 LLM 的 tool content，卡片上不出现
+- Status is visible through the leading icon. Failures use the shared collapsed-preview and full-expansion rules, consistent with bash.
+- The background agent ID appears in model-facing tool content, not on the spawn card.
 
-### agent_stop / agent_send 结果卡
+### agent_stop / agent_send result cards
 
-```
+```text
 ✓ agent_stop "@zoe — research db schema" stopped
 
 ✓ agent_send "@zoe — research db schema" delivered
-  重点看 orders 表的索引和慢查询
+  Focus on indexes and slow queries in the orders table
 
 ✓ agent_send "@parent" delivered
-  我已经检查完，需要你确认部署窗口
+  Review complete; please confirm the deployment window
 
 ✗ agent_stop "@max" stop failed
   agent not found
 ```
 
-- agent_send 的 `to` = 子 agent 的短人名 id（spawn/通知给到的）或 `@parent`（父会话）
-- 注入的消息以普通文本显示在卡片内，完整多行，超 10 行按 head 预览折叠（write 同款）
-- 动画帧在同一行内切换，绝不追加新行
-- 错误保持同一形态：状态行 error 色 + dim 原因行
+- `agent_send.to` is a short child ID returned by spawn/notification, or `@parent` when available.
+- Message text appears in full, including multiple lines; messages over ten lines use a head preview when collapsed, consistent with write.
+- Animation updates the same line, never appends new lines.
+- Errors retain the same shape: an error-colored status line and a dim explanation.
 
-### 完成通知卡片（persistent 时带 idle 标记）
+### Completion notification card
 
-```
-✓ Agent "@max — 检查 CI 配置" completed (sonnet · high · Took 27.5s · 1,250 tokens · 3 tool uses · idle)
-<空行>
+Persistent completion includes an idle marker:
+
+```text
+✓ Agent "@max — Check CI configuration" completed (sonnet · high · Took 27.5s · 1,250 tokens · 3 tool uses · idle)
+<blank line>
 ... (3 earlier lines, ctrl+o to expand)
-Found 5 files handling authentication: src/auth/*.ts …
-<空行>
-session: /path/...jsonl
+Found five files handling authentication: src/auth/*.ts …
+<blank line>
+session: /path/to/session.jsonl
 ```
 
-- header：卡名是 `Agent`，不是工具名 `agent_spawn`——这张卡是「该 agent 完事了」的消息，写成工具名会与真实 spawn 卡逐字同形（#31）；状态由 icon（✓/✗/■）＋状态词（`completed` muted / `failed` error / `stopped` warning）承担，persistent 完成另在 meta 追加 `idle`
-- 底色 `customMessageBg`（pi 给 injected message 的专用色）——工具底色留给真正的工具卡；注册了自定义渲染器 pi 就不再替你套这层（custom-message.js：渲染器 "handles its own styling"），得自己选
-- 渲染数据在 `details`，不进 LLM 上下文
+- The card name is `Agent`, not `agent_spawn`: this message reports the child's completion rather than a tool call (#31). Status uses an icon and word: completed is muted, failed uses the error color, and stopped uses the warning color. Persistent completion adds `idle` to metadata.
+- Background color is `customMessageBg`, Pi's injected-message color. Tool backgrounds remain reserved for actual tool cards. A custom renderer owns its styling rather than receiving Pi's default wrapper.
+- Rendering data lives in `details`, outside the model context.
 
-### Agents 状态 widget（aboveEditor）
+### Agents status widget (aboveEditor)
 
-```
+```text
   ● Agents (done 1/3 · 2 running · 1 idle)
-  ⠋ @max — 检查 CI 配置 (42.0s)
-  ‖ @zoe — 驻留探索代理
+  ⠋ @max — Check CI configuration (42.0s)
+  ‖ @zoe — Resident research agent
 ```
 
-- 仅跟踪后台 agent 与 persistent 前台 agent（前台非 persistent 已 inline 流式，不重复；persistent 前台完成后驻留 idle，进 widget 保持可寻址）
-- 非 persistent 完成/停止立即移除——完成结果由通知卡承担；**persistent 完成后保留 idle 行**（可寻址性可见，‖ 标记，不参与进度计数，可被 agent_stop 移除）
-- 标题行 meta（外层括号 + `·` 分隔，对齐 card header）：`done n/total` 进度 + 实时分段（`n running` / `n idle`）+ 异常计数（`n failed` error 色 / `n stopped`）——行空 widget 消失，计数随下次任务批重置
-- **蜂群降级**：行数超出预算时自动切换——running（活跃）与 failed（异常）行优先，其余折叠为计数行（对齐 Kimi swarm 两档思路）
-- 每行下方追加最新活动摘录（与标题文本起点对齐，实时更新）：工具调用、Thinking...、或最新正文尾部；截断宽度感知终端宽（render 传入），尾部截断
+- Background and persistent foreground children retain addressable display entries; ordinary foreground output is already inline.
+- The status widget removes completed/stopped nonresident rows. Persistent completion retains an idle row (`‖`), outside active progress counts, until stopped.
+- Header metadata combines progress (`done n/total`), live counts (`n running`, `n idle`), and failure/stopped counts. An empty widget disappears; counts reset for the next batch.
+- When rows exceed the display budget, prioritize active/error rows and collapse the remaining entries to counts.
+- Each row includes the latest tool, thinking, or text excerpt. Tail clipping uses the terminal width supplied to rendering.
 
-## 实现决策
+## Implementation decisions
 
-### 架构
+### Architecture
 
-```
-index.ts           — 工具注册（agent_spawn / agent_stop / agent_send）+ 路由粘合
-protocol.ts        — 纯函数 JSONL 协议层
-rpc-client.ts      — 状态化薄 JSONL 客户端（spawn + 事件流 + 退出）
-event-interpret.ts — 原始 RpcEvent → AgentEvent 适配层（纯函数）
-agent-process.ts   — AgentProcess：一个常驻 rpc 子进程的语义封装
-notification.ts    — 完成通知 payload 构造（LLM JSON 截断/stash + details 卡形状单点）
-completion-inbox.ts — 会话级结果收件箱、边界批量交付、空闲单次唤醒
-tree-display.ts    — 子树显示面（显示面统一规则锚点：fold/forward/widget 决策 + 计数）
-registry.ts        — AgentRegistry：运行中 Agent 生命周期 + 点对点投递 + 完成策略
-model.ts           — model spec → resolved model（纯函数）
-types.ts           — 共享协议类型（RenderEvent / SubagentDetails / NotificationDetails）
-render.ts          — 通知卡渲染器（消息面）；格式化直接取自 pi-ui（spinner.js/width.js 正典出口）
-widget.ts          — Agents 状态 widget
-name-gen.ts        — 短人名代理 id（测试）
-spawn-session.ts   — spawn 生命周期（前/后台/persistent 三路）+ 结果分类（表测试）
-nested-fold.ts     — 前景卡子树 telemetry 计数
-views.ts           — 三张工具卡 view（单一来源）
-card.ts            — 通知卡包装（通过 pi-ui）
-preview.ts         — dev-only storybook（随包发布但无运行时影响）
-```
-
-### RPC 协议
-
-- 线格式：JSONL（LF 分隔，与 pi 的 jsonl.js 一致），命令带 id 关联
-- 子进程 detached（独立进程组）：stop 的 SIGTERM 级联到整棵进程树，不遗留孤儿孙进程
-- 自写薄客户端：不绑定 pi 框架私有 RpcClient
-- **父→子消息投递（机制层自动选，LLM 无感知）**：统一发 `prompt` 并传 `streamingBehavior: "steer"`——一个命令覆盖全部状态，无 fallback、无状态判断、无竞态：
-  - 子 idle → 正常起新 turn（唤醒）✓ 实证
-  - 子 running → 自动入 steer 队列（当前 turn 结束后消费），不报错 ✓（源码确定）
-  - 绝不用裸 steer 发 idle 消息：命令假装成功、消息静默挂起永不消费（实证）——违反能力缺失不静默原则
-
-### 生命周期
-
-```
-queued → running ──→ completed（通知）
-                  ├── failed（API 错误/崩溃，通知）
-                  └── stopped（超限，通知；agent_stop，无通知）
-       persistent：completed → idle（进程驻留，零 token）──→ stopped（agent_stop）
+```text
+index.ts            — tool registration and routing glue
+protocol.ts         — pure JSONL protocol and routing
+rpc-client.ts       — subprocess transport, framing, commands, and events
+agent-process.ts    — semantic interface to one resident RPC process
+event-interpret.ts  — pure RPC-event interpretation
+notification.ts     — capped model payload and complete card details
+completion-inbox.ts — session-scoped batching and idle wake control
+tree-display.ts     — subtree routing to cards, widgets, or ancestors
+registry.ts         — child lifecycle, completion policy, and delivery
+model.ts            — model resolution
+types.ts            — shared event and result types
+render.ts           — notification rendering through shared UI primitives
+widget.ts           — conversation agent list
+name-gen.ts         — short agent IDs
+spawn-session.ts    — foreground/background/persistent lifecycle
+nested-fold.ts      — foreground subtree counters
+views.ts            — the three tool-card views
+card.ts             — notification-card wrappers
+preview.ts          — development-only storybook
 ```
 
-- **就绪判定**：prompt 命令 preflight 回执
-- **persistent**：显式开启（`agent_spawn(persistent: true)`），默认不常驻（行为不变）——"不设隐藏限制，限制由调用者显式要求"；全场景可用（驻留范围 = 宿主会话生命周期）；`run_in_background` 仅 root 可用
-- **idle 语义**：进程驻留、零 token（rpc 模式命令驱动，无 turn 不调模型）；完成通知带 `idle` 标记；widget 保留 idle 行（可寻址性可见）；可被 agent_stop 杀掉
-- **stop**：stdin EOF 优雅退出，`stoppedByControl` 抑制通知
-- **失败与超限都返回 isError 工具结果**，与 bash 的 `exit N` / `(cancelled)` 对齐
-- **扩展 reload 不留孤儿**：reload 时 pi 在旧扩展 runner 上派发 `session_shutdown(reason="reload")`（旧 handler 仍在活跃状态），扩展统一调 `registry.shutdown()` 优雅停掉本实例的子代理（stdin EOF）；宿主崩溃时子代理经 stdin EOF 自动退出。所有清理都绑定在**各自进程**的事件上，无跨进程共享状态，多 pi 实例互不干扰
+### RPC protocol
 
-### 消息模型（点对点投递，路由归 LLM）
+- JSONL records are LF-delimited; command IDs correlate replies.
+- Subprocesses have independent process groups. Lifecycle control must not leave orphan descendants.
+- The thin RPC client does not rely on Pi's private client implementation.
+- Parent-to-child messages always use `prompt` with `streamingBehavior: "steer"`, covering both idle and running states without fallback:
+  - Idle: start a new model turn.
+  - Running: queue after the current response and tool batch.
+  - Do not send a bare `steer` command to an idle child: it may acknowledge the command without starting work.
 
-- **id**：短人名（`max` / `zoe` / `kai`…，随机池 + 进程内查重）——**无树结构**——对 LLM 只是"系统给的引用"（信息披露是唯一限制：父持有 spawn 的子 id、子知道 `@parent`）
-- **@ 引用语法**：受控文本（卡 title、widget 行、LLM content、通知 JSON）统一 `@max`——用户匹配对话里的 `@max`；参数 `to` 接受前导 `@`（机制剥除，引导的配套承诺）；`[from max]` 结构化标注保持裸名
-- **机制 = 纯投递器**：`agent_send(to)` 只投"直接子精确 id"或 `@parent`——**不认识的目标显式报错**——无自动转发、无机制层寻路
-- **路由 = LLM**：跨层/兄弟协调由每层 LLM 逐跳发起（它只寻址自己知道的 id；孙→祖 = 每跳 `@parent` 转发）——机制不做任何中间决策
-- **发现机制很薄**：子知道谁 = 父 spawn prompt 告知 + 消息 from 字段（文本 `[from max]` 前缀，rpc 投递只传字符串，文本级标注最省）
+### Lifecycle
 
-### 通道（零新端点，全复用现有基础设施）
-
-```
-父→子：现有 rpc（prompt / steer，见 RPC 协议投递策略）
-子→父：extension_ui_request（rpc 模式 setStatus 携带 JSON，专属 key "pi-subagent-msg"；
-        fire-and-forget 尽力投递，无确认——本地 rpc 通行可靠）
-主动消息：pi.sendMessage（deliverAs: "steer" + triggerTurn: true）
-自动结果：turn_end / agent_before_settle 批量 entries；空闲时独立卡片 + 一次 steer 唤醒
+```text
+queued → running ──→ completed (notify)
+                  ├── failed (API error/crash; notify)
+                  └── stopped (limit: notify; agent_stop: no notification)
+       persistent: completed → idle (resident, zero model tokens) → stopped
 ```
 
-- **零 socket、零文件写入、零轮询**——纯内存事件流
-- 注入语义（已实证）：父 streaming（工具 execute 挂起/LLM 跑）→ 消息排队不抢占；父空闲 → 立即起新 turn 唤醒
-- 事件天然带身份：每个 AgentProcess 持有自己的 RpcClient 连自己的子进程——收到 extension_ui_request 的 client 即消息来源，无需 id 字段
-- 身份注入：spawn 时环境变量 `PI_SUBAGENT_AGENT_ID`（本 agent 人名 id，子进程据此自认是子）；agent_send 全实例注册（root 用它给后台子发消息），仅上行 UI 上报限子进程（hasParent）
+- Readiness is established by the prompt preflight response.
+- Root children are persistent by default; children spawned inside a sub-agent are not. Callers may override this. Residency lasts only for the host session. Background spawning is root-only.
+- Idle means a resident RPC process without an active model turn. Notifications and widget rows identify it as idle; it remains addressable until stopped or host exit.
+- Stop closes stdin for orderly shutdown and marks `stoppedByControl` to suppress a new completion notification.
+- Failures and limit stops produce error tool results, consistent with bash exit/cancellation reporting.
+- Reload dispatches `session_shutdown(reason="reload")` to the old extension runtime before replacing it. The registry closes this runtime's children. Host crashes also close their stdin. Cleanup is process-local, so multiple Pi instances do not share lifecycle state.
 
-### 基石验证（2026-08-10 实证）
+### Message model
 
-| 假设 | 结果 |
+- IDs are short generated names (`max`, `zoe`, `kai`), not tree paths. A parent owns the references returned by its spawns.
+- Model-facing references, card titles, and widget rows use `@max`. Input accepts the optional leading `@`; routing strips it once. Sender prefixes such as `[from max]` retain the bare ID.
+- `agent_send` addresses only an exact direct-child ID or `@parent`. Unknown targets fail explicitly. There is no automatic forwarding or route discovery.
+- When nested communication is enabled, cross-level forwarding is decided by each intermediate parent. The mechanism makes no routing decisions for the model.
+- Prompts and sender prefixes disclose the available references. RPC message payloads remain plain text.
+
+### Channels
+
+Reuse existing transport without new endpoints:
+
+```text
+parent → child: RPC prompt with streamingBehavior="steer"
+child → parent: extension_ui_request / setStatus, key "pi-subagent-msg"
+                best-effort, fire-and-forget, no receipt
+active message: pi.sendMessage(deliverAs="steer", triggerTurn=true)
+automatic result: batched turn_end / agent_before_settle entries;
+                  separate idle cards and one steer wake
+```
+
+- Messaging uses in-memory event flow, not sockets, file polling, or a query tool.
+- A running parent consumes injected messages without preemption; an idle parent may start a model turn.
+- Each `AgentProcess` owns a client connection, so the connection identifies the child sending an event.
+- `PI_SUBAGENT_AGENT_ID` identifies a child process. Only instances below `maxDepth` register agent tools. At the default depth, final replies return automatically instead of child `agent_send` calls.
+
+### Transport validation (2026-08-10)
+
+| Assumption | Observed result |
 |---|---|
-| 子进程扩展调 pi.sendMessage(deliverAs: "steer", triggerTurn: true) 注入自己会话 | ✅ 唤醒第二轮 |
-| idle agent 被 triggerTurn 唤醒 | ✅ |
-| 子进程扩展 extension_ui_request（setStatus）被父 rpc-client 完整收到 | ✅ 无节流/去重/长度限制（rpc-mode.js fire-and-forget） |
-| rpc-client 对未知事件类型宽容处理 | ✅ 不认识即忽略 |
-| **裸 steer 发 idle 会话** | ✅ 命令成功但消息静默挂起——**禁用此路径**（投递策略见 RPC 协议） |
-| **prompt + streamingBehavior:"steer" 发 idle 会话** | ✅ 可靠起新 turn（定稿投递策略） |
-| **prompt + streamingBehavior:"steer" 发 running 会话** | ✅ 自动入队不报错（源码确定：SB 存在则不 throw，走 steer 队列） |
+| A child extension injects `pi.sendMessage(deliverAs="steer", triggerTurn=true)` into its session | Starts another turn |
+| `triggerTurn` wakes an idle agent | Confirmed |
+| Child `extension_ui_request` events reach the parent RPC client | Delivered without protocol-level throttling or deduplication |
+| Unknown RPC event types | Ignored without failing the client |
+| Bare `steer` to an idle session | Acknowledged but does not start work; do not use this path |
+| `prompt` with `streamingBehavior="steer"` to an idle session | Starts work |
+| `prompt` with `streamingBehavior="steer"` to a running session | Queues without rejecting the prompt |
 
-### 完成通知
+### Completion notifications
 
-- 就绪结果先进入会话级收件箱；主代理忙碌时在 `turn_end` 批量追加 `custom_message` entries，必要时 `continue: true`；`agent_before_settle` 处理结束边界附近的结果。不等待其他子代理，不改 Pi 全局队列设置。
-- 主代理空闲时，用一个 `setImmediate` 合并已就绪回调，先静默追加前面的结果卡，最后一张以 `deliverAs: "steer", triggerTurn: true` 启动一次处理。卡片数不等于模型调用数。
-- content：`{completion_id, status, agent_id, result, session_path}`（LLM 可见）；persistent 时追加 `idle: true`
-- `completion_id` = 进程实例 UUID + settlement 序号；同事件去重，不按 agent 覆盖、不按文本去重、不过滤“收到”。主动 stop 不生成新完成通知，也不撤销已排队结果。
-- 用户中断／错误时仅保存结果，不请求继续；后续空闲结果同样静默保存，直到下一次正常运行。关闭／切换会话取消定时回调，旧会话 sender 不能投进新会话。
-- 编排提示（`index.ts` 中的工具描述、snippet、guidelines、参数与子任务附言均用英文）：`agent_spawn` 负责“相关后续任务优先复用，独立并行／独立复核才新建”的原则；`agent_send` 只用于有实质内容的协调，禁止纯回执、纯状态通报和反复催收尾；`agent_stop` 定位为取消任务，不做完成后的例行清理，普通纠正不停止重建。
-- 子任务附言明确“暂停工作、以问题结束本轮回复”，避免将 stop 误读为工具调用；完成交付自动返回，不重复主动回报。前台常驻结果提示说明可以继续相关工作，但无需确认。空闲代理零模型 token，随宿主退出关闭；停止不删除对话或撤销文件／已提交作业，恢复前核对实际状态。
-- details：渲染数据，不进 LLM 上下文；persistent 通知卡追加 idle 状态词
-- spawn 失败不投递通知：isError 工具结果已经同时告知 LLM 和用户，额外完成通知会重复
-- **唤醒轮次同样投递**（2026-08-22）：persistent 代理被 agent_send 唤醒并成功完成后，输出经 onIdle → completionNotification → 收件箱回到派发者上下文——与首轮对称（否则 `agent_send` 只回 "delivered"，答案落在父看不见的地方）。主动 stop（stoppedByControl）保持静默；失败唤醒照旧报 failed
+- Ready results first enter a session-scoped inbox. A busy parent receives the whole ready batch after its current response and tool batch, before the next model call: the steering delivery point. `turn_end` appends custom entries and requests at most one continuation; `agent_before_settle` handles the final boundary. Do not interrupt tools or generation, wait for unfinished children, use the follow-up queue, or depend on the global steering consumption mode.
+- Idle delivery uses one `setImmediate` to collect ready callbacks. Append the earlier cards without triggering a turn, then let the final card start one run with `deliverAs: "steer", triggerTurn: true`. Card count is not model-call count.
+- Model content contains `{completion_id, status, agent_id, result, session_path}` and, for persistent completion, `idle: true`.
+- A completion ID combines a process-instance UUID and settlement sequence. Deduplicate the event, not its text or agent ID. Preserve different turns, including acknowledgements. A deliberate stop neither emits a new completion nor retracts queued results.
+- On abort/error, save results without requesting continuation. Later idle results remain silent until another accepted run. Shutdown/session replacement cancels callbacks; senders from the old session cannot write to the new one.
+- Parameter definitions explain parameters. Tool descriptions/snippets explain calls. Coordination rules have one source in [`skills/pi-subagents-workflow/SKILL.md`](skills/pi-subagents-workflow/SKILL.md), not duplicated tool guidelines. `package.json` declares and ships the skill; whole-package discovery advertises its name, description, and path before tool activation, while the body is read on demand. Model-facing guidance uses English.
+- The child prompt suffix explains automatic final replies: ask and end the reply when blocked on missing information, return the result directly when finished, and do not send a duplicate completion report. The skill adds no preset roles, enforced workflow, or default budgets.
+- Timely delivery prevents follow-up queue delay. It cannot guarantee a report remains current after subsequent code changes. Do not filter result text or overwrite one child's earlier reports.
+- Card-only rendering information stays in `details`, outside model context.
+- Spawn failure already returns an error tool result and therefore does not also emit a completion notification.
+- Persistent follow-up turns return through `onIdle → completionNotification → inbox`, just like the initial turn. Otherwise `agent_send` would report delivery without returning the answer. Deliberate stops remain silent; failed follow-ups report failure.
 
-### Graceful turn limits
+### Graceful limits
 
-- **默认不限**——对齐 Codex/CC 的克制姿态。唯一限制是可选 `timeoutMs`（毫秒），未传 = 无限制
-- token 无任何限制；`get_session_stats` 仅用于通知卡统计
+- No default deadline. The optional `timeoutMs` is the only elapsed-task limit.
+- No token limit. `get_session_stats` supplies display-only usage information.
 
-### 会话存储
+### Session storage
 
-- 目录在 pi 标准会话树之外——`pi -r` 保持干净；永不删除
-- `--name` 始终传递：label（80 字截断）——label 是纯 UI 标签，不影响子代理行为
-- attach：`pi --session <path>`
+- Child sessions live outside Pi's standard session tree, keeping `pi -r` uncluttered. Saved sessions are never deleted.
+- Spawn passes `--name`, capped at 80 characters. The label affects display, not agent behavior.
+- Review a saved session with `pi --session <path>`.
 
-### 嵌套
+### Nesting
 
-子实例是完整 pi（加载全局扩展），天然可再 spawn；不注入 depth、不设 max_depth。子进程扩展经 `PI_SUBAGENT_AGENT_ID` 获得自身身份——孙 agent 由子进程自身 registry 分配人名 id。
+`PI_SUBAGENT_DEPTH` and `PI_SUBAGENT_MAX_DEPTH` propagate the main session's depth limit. At default `maxDepth=1`, children have no agent tools. Raising the limit allows eligible children to delegate and communicate along parent-child edges. Each parent registry assigns its own children's IDs.
 
-### 显示面统一规则（2026-08-22）
+### Single-display rule (2026-08-22)
 
-一个子树只在一个地方显示——由子树根被什么装载决定：
+A subtree has one display destination, determined by its anchor:
 
-- **前台 spawn 装得下**：子的整个生命周期包含在父的一次工具调用内 → 子树全部折进该卡的 meta 计数（`done n/total · n running · …`），不上 widget；嵌套卡片本身仍按会话流出现在卡 body 里。计数范围 = 该代理的**后代 spawn**（不含它自己——直接子由卡片 tail 表达）
-- **后台 spawn 溢出**：子的生命周期超出工具调用 → 子树挂 widget（自身一行，后代 indent 行）
+- **Foreground**: the subtree fits inside one parent tool call, so descendant counters fold into that tool card (`done n/total · n running · …`) rather than the widget. Nested activity still appears in the card body. Counters cover descendants, not the direct child whose own output occupies the card.
+- **Background**: the child's lifetime extends beyond the tool call, so it and its descendants appear in widget rows with depth indentation.
 
-机制：所有节点对**所有** spawn（不分前后台）上报树事件，逐跳 verbatim 转发（depth + 1）；消费在锚点边界决定——root 对后台子的子树应用为 widget 行，对前台子的子树折叠进该卡 meta 计数。此前「前台 spawn 不上报」造成两个盲区：前台子的后台孙逃逸到 widget（indent 悬空、父退出后成陈旧行）、后台子的前台孙完全不可见。
+All nodes report all spawns, foreground and background. Intermediate nodes forward the event unchanged except for incrementing depth. The root chooses card folding or widget display. Omitting foreground telemetry previously hid foreground descendants of background children and left escaped background descendants with invalid indentation.
 
-配合「子代理只允许前台 spawn」：子代理子树内不再产生后台边，卡内子树天然纯前台；widget 上只有 root 直接后台链及其后代。
+Children can only spawn foreground work, so no detached edge appears inside their subtrees. Root background edges and their descendants remain represented in the widget.
 
-**persistent 前台子的关卡后归属**：persistent 子在卡完成后仍存活（驻留），其唤醒期间新 spawn 的后代不能再折进已冻结的卡——execute 结算即关闭折叠（`cardClosed`），此后该子树的事件转 widget 行（与后台链同路径）。
+A persistent foreground child may outlive its completed tool card. Once execution settles, `cardClosed` prevents new descendant events from folding into the frozen card; later activity goes to the widget.
 
-**父行消失即子树消失**：节点被停/完成时，它自己就是「报告子孙行 remove」的那个进程——进程一死，遥测随之中断（stdin EOF 会级联杀死后代进程，但不产生任何事件）。所以每个 add 事件携带**直系父 id**（`parent`，逐跳转发时原样保留、只有 depth 增长），持有行的显示面（`AgentWidget`）在 remove 时递归摘掉该行整棵子树，结果一律记 `stopped`——按构造，此时仍在世的后代都是被祖先的退出带走的，没有更精确的真相可取。此前缺口：停掉后台父代理后进程确实全死，但它上报的那些孙代 widget 行无人摘除，永久转 spinner。
+**Removing a parent removes its display subtree.** Process exit ends descendant telemetry, so an add event carries its direct `parent` ID throughout forwarding. `AgentWidget` recursively marks remaining descendants stopped when their parent is removed. Previously those descendants could remain as permanent spinners after their processes had exited.
 
-**词汇单源**（不再靠注释同步）：计数词汇 `done n/total · …` = pi-ui `counterParts`（widget 标题与卡 meta 共用，failed 段的 error 色由消费面自定）；`@id — label` 标题 = views.ts `agentTitle`（widget 行与通知卡共用）；状态图标 = pi-ui card.ts `iconForStatus`（card 与 view 共用）。
+**Shared vocabulary:** `counterParts` supplies widget and card counters; `agentTitle` supplies `@id — label`; shared card helpers supply status icons. Consumers choose status tones without duplicating the vocabulary.
 
-### 子代理禁止后台 spawn；persistent 全场景开放（2026-08-22）
+### Foreground-only child spawning; persistent residency at every level (2026-08-22)
 
-**后台**：子代理的生命周期被父的同步等待封顶——它的后台子要么活不过父的返回（管道 EOF 静默杀死），要么逼出收条 turn 覆盖真正的答卷、卡片计数悬空。这些是后台边与前台等待的时序纠缠，树清理解决不了，所以子代理进程（`PI_SUBAGENT_AGENT_ID` 存在）注册的 agent_spawn schema **直接不含** `run_in_background` 字段（`buildSpawnParamsSchema(HAS_PARENT)`），description/promptGuidelines 同步换为前台版文案（并行→同块多个前台调用，天然并发；长期任务→在答复中上报由调用者决定）。execute 保留一行守卫防幻觉传参。曾实现过「收割」（前台返回前 allSettled 等齐后台子），随本规则作废删除——卡内不可能再有后台边，整类问题（孤子孙、收条覆盖答卷、meta 计数不归位、强制多等一轮）灭绝于源头。
+A child's lifetime is bounded by its parent's foreground wait. Detached descendants would either die when that wait returns or force extra acknowledgement turns that overwrite the actual answer and leave counters inconsistent. Therefore a child schema omits `run_in_background` (`buildSpawnParamsSchema(HAS_PARENT)`), and its description explains foreground delivery. Execution also rejects unexpected background arguments. The earlier mechanism that waited for detached descendants before returning is no longer needed.
 
-**persistent 全场景开放**：其真实语义是「完成后不退场、可继续对话，活到宿主会话结束」——root 的 persistent 在会话退出时同样被 shutdown 清理，子代理的 persistent 在父返回时被树清理收走，二者是同一条规则的不同实例，无承诺破产。典型用例：任务期内开局一个 persistent 助手多轮 agent_send 迭代使用。
+Persistent residency means the process remains available after a completed turn, only until its host session ends. Root residents close with their root host; nested residents close with their parent. This supports repeated `agent_send` calls within the parent's lifetime without promising independent survival.
 
-### 上游限制：isError 被丢弃（workaround）
+### Upstream isError workaround
 
-- **现象**：扩展工具 `execute()` 返回 `{ isError: true }` 时，TUI 卡片仍显示成功背景。
-- **根因**：pi-agent-core 的 `executePreparedToolCall` 在工具正常返回时硬编码 `isError: false`——只有 throw 异常才能拿到 `isError: true`。该行为自 2025-09-09 引入，上游 issue **#5209** 被维护者拒绝，预期不会修复。
-- **workaround**：所有错误路径的 `details` 带 `error` 字段；注册 `pi.on("tool_result")` hook 检测 `details.error` → 返回 `{ isError: true }`。该 hook 走 `afterToolCall` 的官方覆盖通道，既修正 isError 又保留 details；官方推荐的 throw 方式会清空 details，故不采用。
+- Symptom: an extension returning `{isError: true}` can still receive a successful tool-card background.
+- Cause: the upstream normal-return path in `executePreparedToolCall` sets `isError: false`; thrown failures follow a different path. The historical upstream issue is #5209.
+- Workaround: error results carry `details.error`. A `tool_result` hook restores `isError: true` through the supported result override while preserving details. Throwing instead would lose those details.
 
-## 不在此范围
+## Outside this scope
 
-- **预定义 agent 类型系统**：agent 由调用者参数完全定义。
-- **schedule / 定时任务**。
-- **worktree 隔离**。
-- **fleet view / conversation viewer**：不渲染子对话流；attach 走 pi 原生 `--session <path>`。
-- **并发上限 / 排队**：多后台 = 多进程，LLM/用户自负其责。
-- **结果查询工具**：通知一次投递，不做轮询/查询原语。
-- **Windows 支持**：依赖 POSIX 进程与管道语义。
-- **会话删除**：子会话永不删除，供复盘。
+- Predefined agent types: callers define the agent through parameters.
+- Scheduling.
+- Worktree isolation.
+- A separate fleet-management framework; the native agent view and saved-session attach provide inspection.
+- Concurrency limits or a worker queue: each background child is a process.
+- Result polling/query tools: completion is pushed once.
+- Windows support: process and pipe lifecycle assumes POSIX.
+- Session deletion: retain child conversations for review.
 
-## 其它说明
+## Other notes
 
-- 扩展经 `~/.pi/agent/extensions/` 或 `pi install` 加载；子 pi 实例（嵌套场景）同样加载扩展，天然获得 agent_spawn / agent_stop / agent_send 工具。
-- headless（`pi -p`）：主 agent 响应结束即进程退出，后台子 agent 经 stdin EOF 被清理（无孤儿）；后台工作流面向常驻 TUI 会话。
+- Load the extension through the standard extension directory or `pi install`. Nested Pi instances use the same extension, subject to the inherited depth limit.
+- In headless mode (`pi -p`), host exit closes child stdin. Background workflows require a long-lived host session.

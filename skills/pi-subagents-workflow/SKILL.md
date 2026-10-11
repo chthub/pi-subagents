@@ -1,0 +1,15 @@
+---
+name: pi-subagents-workflow
+description: Coordinate delegated work with agent_spawn, agent_send, and agent_stop. Use when the main agent plans parallel tasks, assigns file changes, continues a sub-agent's work, or integrates independent checks.
+---
+
+# Sub-agent coordination
+
+These instructions are for the main agent. Assign work from the current request; do not invent predefined agent roles or expand the user's authorization.
+
+1. **Specify the task.** Give each sub-agent the goal, necessary context and paths, files it may change, and expected result. Include any decisions or limits it cannot infer from its separate context.
+2. **Parallelize independent work.** If a task needs an undecided interface, settle that interface first. Otherwise keep working or wait for results; do not poll or repeatedly ask for completion. Handle communication between sub-agents yourself, using their actual available tools rather than asking them to contact one another.
+3. **Keep file changes separate.** Only one agent may change a given file at a time, including the main agent. A checking task is read-only unless edits were explicitly assigned. When a check finds a defect, pass the concrete finding to the agent responsible for that file rather than changing it concurrently.
+4. **Continue related work.** Prefer the original sub-agent for questions, revisions, additional tests, or later stages of the same task. Start a new one for independent parallel work, an independent check needing fresh context, or when the existing agent is unsuitable—not merely because its previous turn ended.
+5. **Avoid unnecessary messages and stops.** Send only new work, necessary information, corrections, or answers. Do not send thanks, receipts, status-only announcements, or requests to repeat an already-delivered report. Do not routinely stop completed agents; stop for cancellation, incorrect execution that must halt, or an explicit stop request. Report to the user when a result changes the conclusion, risk, or next action, not for each notification.
+6. **Check what is missing.** Inspect existing check results and their scope before running more checks. An independent check should examine a risk or boundary the existing checks did not cover. The main agent verifies cross-task integration rather than replaying every sub-agent check. After changes, rerun affected checks; an old notification alone is not a reason to repeat work. Judge findings against the current files, and distinguish a defect in the actual inputs from a hypothetical future compatibility risk.

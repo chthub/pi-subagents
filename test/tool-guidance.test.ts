@@ -3,7 +3,7 @@ import { test } from "node:test";
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import extension from "../index.js";
 
-type Guidance = Pick<ToolDefinition, "name" | "description" | "promptSnippet" | "promptGuidelines">;
+type Guidance = Pick<ToolDefinition, "name" | "description" | "promptSnippet" | "promptGuidelines" | "parameters">;
 const tools = new Map<string, Guidance>();
 extension({
 	on: () => () => {},
@@ -19,40 +19,48 @@ function guidance(name: string): Guidance {
 	return tool;
 }
 
-test("all model-facing agent descriptions and guidelines remain English", () => {
+test("tool guidance stays English and leaves coordination policy to the skill", () => {
 	for (const name of ["subagent_enable", "agent_spawn", "agent_stop", "agent_send"]) {
 		const tool = guidance(name);
+		const text = [tool.description, tool.promptSnippet].join("\n");
+		assert.doesNotMatch(text, /[\u3400-\u9fff]/u);
+		assert.equal(tool.promptGuidelines, undefined);
 		assert.doesNotMatch(
-			[tool.description, tool.promptSnippet, ...(tool.promptGuidelines ?? [])].join("\n"),
-			/[\u3400-\u9fff]/u,
+			text,
+			/Do not routinely|thanks|receipts|prefer agent_send|independent review|not a silent note/,
 		);
 	}
+	assert.match(guidance("subagent_enable").description, /pi-subagents-workflow skill if available/);
 });
 
-test("spawn prefers reuse for related work but permits independent fresh-context review", () => {
-	const text = guidance("agent_spawn").promptGuidelines?.join("\n") ?? "";
-	assert.match(text, /prefer agent_send with the original id/);
-	assert.match(text, /saved sessions can be resumed/);
-	assert.match(text, /independent review needing fresh context/);
-	assert.match(text, /no acknowledgement/);
+test("parameter descriptions explain fields without embedding coordination policy", () => {
+	const schema = JSON.stringify(guidance("agent_spawn").parameters);
+	assert.doesNotMatch(schema, /don't switch|don't change|cheaper model|risky\/looping|cannot do anything useful/);
+	assert.match(schema, /Omit to inherit your current model/);
+	assert.match(schema, /Tool allowlist/);
 });
 
-test("stop is cancellation, not routine cleanup or stop-and-respawn", () => {
+test("spawn describes automatic replies, batched delivery, and default child capabilities", () => {
+	const text = guidance("agent_spawn").description;
+	assert.match(text, /final reply is returned automatically, including questions/);
+	assert.match(text, /after the current response and tool batch, before the next model request/);
+	assert.match(text, /idle parent wakes once for the ready batch/);
+	assert.match(text, /default maxDepth=1, children have no agent tools/);
+	assert.match(text, /truncated with a path to the full output/);
+});
+
+test("stop describes process and execution facts without prescribing a workflow", () => {
 	const tool = guidance("agent_stop");
-	assert.equal(tool.promptSnippet, "Cancel a sub-agent task");
-	assert.match(tool.description, /not deleted.*not rolled back/);
-	assert.match(tool.promptGuidelines?.join("\n") ?? "", /Do not routinely stop/);
-	assert.match(tool.promptGuidelines?.join("\n") ?? "", /prefer agent_send/);
-	assert.doesNotMatch(
-		tool.promptGuidelines?.join("\n") ?? "",
-		/stop it and respawn|Stop a persistent agent when you no longer need it/,
-	);
+	assert.equal(tool.promptSnippet, "Stop a sub-agent process");
+	assert.match(tool.description, /not deleted.*not rolled back.*jobs are not cancelled/);
+	assert.match(tool.description, /no new completion notification/);
 });
 
-test("send explains steering and continuation without encouraging process cleanup", () => {
-	const tool = guidance("agent_send");
-	assert.match(tool.description, /after the target's current response and tool batch, before its next model request/);
-	assert.match(tool.description, /resumes exited children with recoverable saved sessions/);
-	assert.match(tool.promptGuidelines?.join("\n") ?? "", /status-only announcements/);
-	assert.doesNotMatch(tool.promptGuidelines?.join("\n") ?? "", /release.*process|agent_stop/);
+test("send describes delivery, idle model turns, resume, and automatic return", () => {
+	const text = guidance("agent_send").description;
+	assert.match(text, /direct child, or to @parent when this tool is available in a child/);
+	assert.match(text, /after the target's current response and tool batch, before its next model request/);
+	assert.match(text, /Starts a new model turn for idle children/);
+	assert.match(text, /resumes exited children with recoverable saved sessions/);
+	assert.match(text, /final reply is returned automatically/);
 });

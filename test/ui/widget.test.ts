@@ -362,7 +362,9 @@ describe("StatusWidget — width-aware activity clipping (no over-wide regressio
 	});
 
 	it("clips CJK and emoji-ZWJ activity by visible width (grapheme-aware)", () => {
-		const cjk = activityLine(50, [{ style: "tool", content: "bash: 调研亮色高亮色处理方案".repeat(30) }]);
+		const cjk = activityLine(50, [
+			{ style: "tool", content: "bash: \u8c03\u7814\u4eae\u8272\u9ad8\u4eae\u8272\u5904\u7406\u65b9\u6848".repeat(30) },
+		]);
 		assert.ok(visibleWidth(cjk) <= 50, `CJK width ${visibleWidth(cjk)} > 50`);
 		const zwj = activityLine(30, [
 			{ style: "text", content: "\ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67".repeat(200) },

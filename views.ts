@@ -130,7 +130,7 @@ export const spawnView = createToolView<Record<string, unknown>, SubagentDetails
 		}
 		// Nested-subtree summary (foreground cards): the whole descendant
 		// tree of this agent folded into one count set — the shared counter
-		// vocabulary (pi-ui counterParts; SPEC: 显示面统一规则).
+		// vocabulary (pi-ui counterParts; SPEC: single-display rule).
 		const n = d?.nested;
 		if (n && n.total > 0) {
 			parts.push(...counterParts(n).map((p) => p.text));
@@ -158,7 +158,7 @@ export const spawnView = createToolView<Record<string, unknown>, SubagentDetails
 		},
 	},
 	// Session footer: recoverable on the card, never into LLM context
-	// (SPEC: footer 仅 session: <path>). Foreground completion and a started
+	// (SPEC: footer contains only session: <path>). Foreground completion and a started
 	// background spawn both carry it.
 	footer: (ctx) => ctx.result?.data?.sessionPath,
 });

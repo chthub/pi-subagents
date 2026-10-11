@@ -131,8 +131,8 @@ test("different turns of one child are never overwritten or text-filtered", () =
 	h.start();
 	const deliver = h.capture();
 	deliver(notice("max:1", "important report"));
-	deliver(notice("max:2", "收到"));
-	deliver(notice("max:3", "收到"));
+	deliver(notice("max:2", "Acknowledged"));
+	deliver(notice("max:3", "Acknowledged"));
 	const batch = h.boundary();
 	assert.deepEqual(ids(batch), ["max:1", "max:2", "max:3"]);
 	assert.match(JSON.stringify(batch), /important report/);

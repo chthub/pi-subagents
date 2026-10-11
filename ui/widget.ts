@@ -44,7 +44,7 @@ export interface CounterPart {
 
 /** The shared counter vocabulary (`done n/total · n running · …`) — the
  *  widget title and the card nested-subtree meta must speak the same words
- *  (pi-subagent SPEC: 显示面统一规则). Consumers render tone per surface
+ *  (pi-subagent SPEC: single-display rule). Consumers render tone per surface
  *  (widget colors failed; the card meta stays dim). */
 export function counterParts(c: CounterCounts): CounterPart[] {
 	const parts: CounterPart[] = [{ text: `done ${c.done}/${c.total}`, tone: "normal" }];
@@ -244,8 +244,8 @@ export class StatusWidget {
 	 * parity: its Loader animates only during execution and stops at
 	 * setComplete. Idle/terminal rows are static; content events redraw them
 	 * on demand (zero periodic redraws when nothing is running). May dispose
-	 * the widget when the last row ends (immediate removal — SPEC: 完成/停止
-	 * 立即移除).
+	 * the widget when the last row ends (immediate removal — SPEC: completed/stopped
+	 * removed immediately).
 	 */
 	private reconcile(): void {
 		this.cleanupTerminal();

@@ -42,7 +42,7 @@ describe("clipTail", () => {
 		assert.ok(out.startsWith("\u2026"));
 	});
 	it("limits by terminal width, not char count (CJK = 2 columns)", () => {
-		const out = clipTail("调研亮色高亮色处理".repeat(20), 80);
+		const out = clipTail("\u8c03\u7814\u4eae\u8272\u9ad8\u4eae\u8272\u5904\u7406".repeat(20), 80);
 		assert.ok(visibleWidth(out) <= 80, `width ${visibleWidth(out)} > 80`);
 		assert.ok(out.startsWith("\u2026"), "long tail should be ellipsis-prefixed");
 	});
@@ -58,7 +58,7 @@ describe("safeTitle", () => {
 		assert.ok(out.endsWith("\u2026"));
 	});
 	it("caps by terminal width for CJK titles", () => {
-		const out = safeTitle("调研亮色高亮色处理方案".repeat(8), 40);
+		const out = safeTitle("\u8c03\u7814\u4eae\u8272\u9ad8\u4eae\u8272\u5904\u7406\u65b9\u6848".repeat(8), 40);
 		assert.ok(visibleWidth(out) <= 40, `width ${visibleWidth(out)} > 40`);
 		assert.ok(out.endsWith("\u2026"));
 	});
@@ -73,8 +73,8 @@ describe("safeTitle", () => {
 
 describe("reuses pi-tui width utilities", () => {
 	it("visibleWidth counts CJK as 2 columns", () => {
-		assert.equal(visibleWidth("中文"), 4);
-		assert.equal(visibleWidth("a中b"), 4);
+		assert.equal(visibleWidth("\u4e2d\u6587"), 4);
+		assert.equal(visibleWidth("a\u4e2db"), 4);
 	});
 });
 

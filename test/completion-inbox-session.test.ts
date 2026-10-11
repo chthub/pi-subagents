@@ -79,6 +79,7 @@ async function setup(t: TestContext, extra?: (pi: ExtensionAPI, deliver: (id: st
 		content: [{ type: "text", text: "done" }],
 		stopReason: "stop",
 	});
+	let replyGate: Promise<void> | undefined;
 	session.agent.streamFunction = (_model, context, options) => {
 		// Like a real provider, an already-aborted request returns an abort event
 		// without making a model/network call. The low-level loop may invoke this
@@ -106,14 +107,20 @@ async function setup(t: TestContext, extra?: (pi: ExtensionAPI, deliver: (id: st
 			...response,
 		};
 		stream.push({ type: "start", partial: message });
-		if (message.stopReason === "aborted" || message.stopReason === "error") {
-			stream.push({ type: "error", reason: message.stopReason, error: message });
-		} else if (message.stopReason === "pending") {
-			throw new Error("The scripted provider must finish its response");
-		} else {
-			stream.push({ type: "done", reason: message.stopReason, message });
-		}
-		stream.end();
+		const finish = () => {
+			if (message.stopReason === "aborted" || message.stopReason === "error") {
+				stream.push({ type: "error", reason: message.stopReason, error: message });
+			} else if (message.stopReason === "pending") {
+				throw new Error("The scripted provider must finish its response");
+			} else {
+				stream.push({ type: "done", reason: message.stopReason, message });
+			}
+			stream.end();
+		};
+		const gate = replyGate;
+		replyGate = undefined;
+		if (gate) void gate.then(finish);
+		else finish();
 		return stream;
 	};
 	return {
@@ -121,6 +128,13 @@ async function setup(t: TestContext, extra?: (pi: ExtensionAPI, deliver: (id: st
 		requests,
 		errors,
 		deliver: (id: string) => deliver(result(id)),
+		holdNextReply: () => {
+			let release!: () => void;
+			replyGate = new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			return release;
+		},
 		reply: (fn: typeof reply) => {
 			reply = fn;
 		},
@@ -141,6 +155,7 @@ test("real loop: three completions during a tool batch enter request 2, not thre
 		});
 	});
 	h.session.setActiveToolsByName(["collect"]);
+	h.session.setSteeringMode("one-at-a-time");
 	h.reply((n) =>
 		n === 1
 			? { content: [{ type: "toolCall", id: "call-1", name: "collect", arguments: {} }], stopReason: "toolUse" }
@@ -150,6 +165,42 @@ test("real loop: three completions during a tool batch enter request 2, not thre
 	assert.equal(h.requests.length, 2);
 	for (const id of ["a:1", "b:1", "c:1"]) assert.ok(h.requests[1].includes(id), h.requests[1]);
 	assert.equal(h.session.sessionManager.getBranch().filter((e) => e.type === "custom_message").length, 3);
+	assert.deepEqual(h.errors, []);
+});
+
+test("real streaming response: ready results enter the next request without interrupting generation", async (t) => {
+	const h = await setup(t);
+	h.session.setSteeringMode("one-at-a-time");
+	const release = h.holdNextReply();
+	t.after(release);
+	const run = h.session.prompt("work");
+	await tick();
+	assert.equal(h.requests.length, 1);
+	for (const id of ["a:1", "b:1", "c:1"]) {
+		h.deliver(id);
+		await tick();
+		assert.equal(h.requests.length, 1, "completion must not interrupt the active response");
+	}
+	release();
+	await run;
+	assert.equal(h.requests.length, 2, "one continuation for the whole ready batch");
+	for (const id of ["a:1", "b:1", "c:1"]) assert.ok(h.requests[1].includes(id));
+	assert.deepEqual(h.errors, []);
+});
+
+test("real boundary arrival: a result at turn_end is visible in the immediately following request", async (t) => {
+	let delivered = false;
+	const h = await setup(t, (pi, deliver) => {
+		pi.on("turn_end", () => {
+			if (delivered) return;
+			delivered = true;
+			deliver("late:1");
+		});
+	});
+	h.reply((n) => ({ content: [{ type: "text", text: `response ${n}` }], stopReason: "stop" }));
+	await h.session.prompt("work");
+	assert.equal(h.requests.length, 2);
+	assert.ok(h.requests[1].includes("late:1"));
 	assert.deepEqual(h.errors, []);
 });
 

@@ -14,17 +14,17 @@ rl.on("line", (line) => {
 	const cmd = JSON.parse(line);
 
 	if (cmd.type === "split_utf8") {
-		// Cut after the first byte of "文" (3-byte char): first chunk ends with
+		// Cut after the first byte of the second CJK character (three UTF-8 bytes): first chunk ends with
 		// an incomplete multibyte sequence, second chunk completes it.
 		const payload = JSON.stringify({
 			id: cmd.id,
 			type: "response",
 			command: "split_utf8",
 			success: true,
-			data: { file: "路径/文件😀" },
+			data: { file: "\u8def\u5f84/\u6587\u4ef6😀" },
 		});
 		const buf = Buffer.from(`${payload}\n`);
-		const cut = Buffer.byteLength("路径/") + 1;
+		const cut = Buffer.byteLength("\u8def\u5f84/") + 1;
 		process.stdout.write(buf.subarray(0, cut));
 		setTimeout(() => process.stdout.write(buf.subarray(cut)), 20);
 		return;

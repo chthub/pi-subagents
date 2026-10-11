@@ -7,7 +7,7 @@
  *     card (its card closed when its spawn returned) — so the widget is the
  *     only surface its follow-up output can reach;
  *   - the tree telemetry hears about every update too: it folds into an open
- *     card, forwards up, or lands on the widget, per the 显示面统一规则;
+ *     card, forwards up, or lands on the widget, per the single-display rule;
  *   - the spawn card hears about it only when a foreground spawn has one, and
  *     only while its tool call runs.
  *

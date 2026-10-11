@@ -190,7 +190,7 @@ export class AgentWidget {
 			lines.push(renderAgentLine(entry, theme, this.spinner, idWidth, width, hovered));
 			this.lineAgents.push(entry.indent === 0 || entry.sessionPath ? entry.agentId : undefined);
 		}
-		const tail = hidden > 0 ? `… +${hidden} more · /agents` : "点击进入 · /agents";
+		const tail = hidden > 0 ? `… +${hidden} more · /agents` : "Click to open · /agents";
 		lines.push(truncateToWidth(theme.fg("dim", ` ${tail}`), width, ""));
 		this.lineAgents.push(undefined);
 		return lines;

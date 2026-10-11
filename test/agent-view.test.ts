@@ -223,7 +223,7 @@ test("dragging to the bottom resumes following streamed output", async (t) => {
 });
 
 test("hover widens the thumb without rewrapping content or changing its position", async (t) => {
-	const content = Array.from({ length: 100 }, (_, i) => `line ${i} 中文 ${"long text ".repeat(20)}`).join("\n");
+	const content = Array.from({ length: 100 }, (_, i) => `line ${i} \u4e2d\u6587 ${"long text ".repeat(20)}`).join("\n");
 	const { view } = setup(async () => [message([{ type: "text", text: content }], "stop")]);
 	t.after(() => view.dispose());
 	await Promise.resolve();

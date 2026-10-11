@@ -21,7 +21,7 @@ Pi 没有内置 sub-agent。于是重活、并行的活、吃上下文的活，�
 
 - **安静上下文** — 日志、搜索结果、测试输出留在子窗口里。你拿到最终结果，不是一片杂乱。
 - **真正并行** — 一次起多个后台 agent，就绪结果在主代理下一个 turn 边界一起交付，每份保留独立卡片。无任务排队、无取结果工具。
-- **全程可控** — `agent_send` 给运行中的 agent 发消息重定向（也能唤醒空闲的），`agent_stop` 终止。子 agent 发往父会话的消息是尽力投递（无确认）。
+- **全程可控** — `agent_send` 给运行中的 agent 发消息重定向（也能唤醒空闲的），`agent_stop` 停止进程。最终回复自动回传；默认深度下子代理没有 agent 工具。
 - **追问保留上下文** —— 子代理完成后默认常驻（空闲，零 token；每个约 180 MB 内存），`agent_send` 发给进程已退出的子代理时会从会话文件自动复活它。子代理缺信息或需要决策时，把问题作为最后的回答结束；父代理用 `agent_send` 回答，子代理接着原来的上下文继续。
 - **Pi 原生** — 渲染、会话、attach 全复用 pi 自己的机制；卡片看起来像内置工具——因为它们就是。
 - **继承或覆盖** — 子 agent 默认继承你的模型与推理强度，也可逐个覆盖。便宜模型做侦察，强模型做实现。
@@ -29,7 +29,7 @@ Pi 没有内置 sub-agent。于是重活、并行的活、吃上下文的活，�
 - **可复盘** — 每个会话持久化、永不删除；任何结果都能 `pi --session <path>` 回看。
 - **按需嵌套** — 默认子代理不能再派子代理；在配置文件里调高 `maxDepth` 才允许。
 - **Token 经济** — 系统侧保持克制：
-  - **系统提示** — 三个工具 + 简短指南，注入约 2–3KB 系统提示（token 数随 tokenizer 略有出入）。
+  - **系统提示** — 工具描述只解释操作，协调规则放在按需读取的 skill 中。
   - **通知** — LLM 只看到最小结构化数据；装饰（label、用量）留在渲染层，永不进入 LLM 上下文。
   - **结果** — 自动截尾（2000 行 / 50KB）；展开任何卡片仍见全量。
 
@@ -45,7 +45,7 @@ pi-subagent 与 [`@tintinweb/pi-subagents`](https://github.com/tintinweb/pi-suba
 | 并行 | 无并发上限（一 agent 一进程） | 队列，默认并发 4 | 有 spawn / turn / usage budget |
 | 默认限制 | 无（可选 `timeoutMs`） | graceful turn limits | turn / usage budget |
 | 可观测性 | pi 原生卡片 + widget + `pi --session` | FleetView + conversation viewer | FleetView inspector + fleet |
-| 嵌套 | 天然、无深度上限 | opt‑in、有深度上限 | recursion guard |
+| 嵌套 | 默认关闭；可配置 `maxDepth` | opt‑in、有深度上限 | recursion guard |
 | 附加能力 | token 经济、零运行时依赖、reload/崩溃零孤儿 | memory、worktree 隔离、定时任务、跨扩展 RPC、事件总线 | missions/定时、watchdog、worktree、intercom、chain 编排 |
 | 适合 | 自己掌控组合 | 开箱即用的完整子 agent 系统 | 内置角色 + 工作流编排 |
 
@@ -91,7 +91,15 @@ Pi 调用 `agent_send` 向运行中的 agent 注入 steering（当前模型响�
 
 ## 启用方式
 
-三个 agent 工具注册时**默认不激活**：不派子代理的对话里不带它们的参数说明和指引。常驻的只有一个无参数的 `subagent_enable`，你提到子代理（或任务明显适合委托）时模型会先调用它，下一次请求起三个工具才出现。启用记录写进会话，resume 后仍然有效。
+三个 agent 工具注册时**默认不激活**：不派子代理的对话里不带它们的参数说明。无参数的 `subagent_enable` 启用工具，下一次模型请求起生效。启用记录写进会话，resume 后仍然有效。
+
+## 协调 skill
+
+包内自带 [`pi-subagents-workflow`](skills/pi-subagents-workflow/SKILL.md)，是任务边界、并行、文件修改分工、后续工作和检查规则的唯一维护位置。不定义预设代理身份，也不在运行时强制工作流。
+
+加载整个包后，新窗口默认就能看到 skill 的名称、触发描述和路径，不需要先调用 `subagent_enable`。模型读取 skill 或用户调用 `/skill:pi-subagents-workflow` 时，全文才进入上下文。包的 skill 过滤配置和 `--no-skills` 可以禁用发现。只用 `-e` 加载 `index.ts` 不会同时加载包内 skill。
+
+工具描述解释调用会发生什么，skill 说明主代理怎么组织工作。子代理即使没有读取 skill，也会收到一段解释最终回复自动回传的简短任务附言。
 
 ## 底部列表与子代理窗口
 
@@ -149,7 +157,7 @@ Pi 调用 `agent_send` 向运行中的 agent 注入 steering（当前模型响�
 | `timeoutMs` | number | 无 | 可选截止时间（毫秒）。触发时扩展停止子进程、等其 settled 后优雅退出。 |
 | `persistent` | boolean | `true`（根会话）/ `false`（子代理内） | 完成后常驻（空闲，零 token），追问时不用重启；`agent_stop` 结束它。`false` 时完成即退出，`agent_send` 仍会从会话文件复活它。 |
 
-同一任务的追问、修订、补测和后续阶段，优先通过原 ID 的 `agent_send` 复用相关代理，包括需要从保存会话恢复的代理。只有独立并行任务、需要干净上下文的独立复核，或已有代理不适合时才新建；不因上一轮完成就创建替代代理。
+最终回复（包括无法继续时提出的问题）自动回传。默认 `maxDepth=1` 时子代理没有 agent 工具，协调由父代理完成。
 
 #### `agent_stop` — 取消代理任务
 
@@ -157,7 +165,7 @@ Pi 调用 `agent_send` 向运行中的 agent 注入 steering（当前模型响�
 |---|---|
 | `agent_id` | **必填** — `agent_spawn` 返回的 agent id。取消正在执行的任务并停止进程；明确要求停止空闲代理时只关闭进程。优雅终止（stdin EOF）；不生成新的完成通知。 |
 
-用于任务取消、用户明确要求停止，或必须立即中止的错误执行。普通纠正用 `agent_send`，不在完成后例行停止或重建代理。空闲代理不消耗模型 token，随父会话退出而关闭。停止不会删除保存的对话，也不会撤销文件修改或已提交作业；恢复前须核对实际状态。
+停止不会删除保存的对话、撤销文件修改或取消已提交作业。空闲进程不消耗模型 token，随宿主会话退出而关闭。
 
 #### `agent_send` — 树内发消息
 
@@ -166,11 +174,9 @@ Pi 调用 `agent_send` 向运行中的 agent 注入 steering（当前模型响�
 | `to` | **必填** — agent_spawn 给到的 agent id（短人名，如 `max`），或 `"@parent"` 发给 spawn 你的会话。 |
 | `message` | **必填** —— 消息文本；在目标当前轮结束后送达，唤醒空闲子代理，或从会话文件复活已结束的子代理（回答以通知送回）。 |
 
-`agent_send` 会启动后续工作，不是静默留言。只用于后续任务、必要纠正、补充缺失信息或回答问题；不要用它道谢、发收条、纯状态通报或要求已经完成的代理收尾。完成通知无需确认，应直接整合到工作，不逐条向用户回复“结论不变”。
+向空闲子代理发消息会启动新一轮模型调用；向已退出的子代理发消息会恢复保存的会话。最终回复自动返回。
 
-消息沿树的父子边路由：直接子 agent 下投，`@parent` 上抛，跨层/兄弟消息经途经的父 LLM 上下文中转（见[嵌套 sub-agent](#嵌套-sub-agent)）。
-
-LLM 通过 `promptSnippet` + `promptGuidelines`（系统提示注入）获得使用指南：何时委派、prompt 必须自包含、绝不轮询。
+工具只能寻址直接子代理，或在调用者具备 agent 工具时寻址 `@parent`。不能直接投递给兄弟代理，跨层协调需要父代理转发。
 
 ## 进阶
 
@@ -197,7 +203,7 @@ LLM 通过 `promptSnippet` + `promptGuidelines`（系统提示注入）获得使
 每个 sub-agent 都是带持久化 session 的常驻 `pi --mode rpc` 子进程：
 
 - **前台** — `agent_spawn` 等待子进程 settled，取最终输出，然后关闭 stdin（优雅退出）。
-- **后台结果** — `agent_spawn` 立即返回；子代理 settled 后，结果进入会话级收件箱。主代理忙碌时，在 `turn_end` 一次交付所有就绪结果，`agent_before_settle` 兜底，不排进逐条 follow-up 队列。空闲时只合并一个事件循环 tick 内已就绪的结果，保留独立卡片、只启动一次模型处理，不等待尚未完成的子代理。
+- **后台结果** — `agent_spawn` 立即返回；子代理 settled 后，结果进入会话级收件箱。主代理忙碌时，所有就绪结果在当前回复及工具批次结束后、下一次模型调用前一起送达，也就是 steer 的交付时机；通过 `turn_end` 实现，`agent_before_settle` 兜底。不打断生成或工具，不进入 follow-up 队列，不依赖全局 steering 队列的逐条／全部消费设置。空闲时只合并一个事件循环 tick 内已就绪的结果，保留独立卡片、只启动一次模型处理，不等待尚未完成的子代理。这防止排队造成的延迟，不保证报告在后续文件修改后仍然代表最新状态。
 - **发消息/停止** — `agent_send` 双向均用 steering（当前响应及工具批次结束后、下一次模型调用前），空闲子代理会被唤醒；`agent_stop` 关闭 stdin 优雅退出，不新增完成通知，但不删除已排队的有效结果。
 - **Persistent idle** — `persistent: true` 时子进程完成后驻留 idle（零 token）；之后 `agent_send` 可唤醒继续同一上下文，`agent_stop` 结束。完成通知与 widget 行带 `idle` 标记。
 - **提问与交付** — 每个子任务末尾说明：缺信息时暂停工作，以问题结束本轮回复，等待父代理回答；完成后直接返回交付，结果自动回传，不额外发送一份完成报告。

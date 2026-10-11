@@ -59,7 +59,7 @@ export interface AgentProcessOptions {
 	sessionDir?: string;
 	/** Total wall-clock timeout for the whole task (incl. multi-turn).
 	 *  Omitted = no limit (the default): the child runs until it finishes
-	 *  or is stopped — there is no token limit (SPEC: token 无任何限制). */
+	 *  or is stopped — there is no token limit (SPEC: no token limit). */
 	timeoutMs?: number;
 	/** After an abort, how long to wait for the child to settle before hard-stopping it. */
 	abortSettleGraceMs?: number;
@@ -291,8 +291,8 @@ export class AgentProcess {
 	 * Wait until the agent reaches a terminal state.
 	 *
 	 * The wait is bounded by the overall deadline: a child stuck in a hung
-	 * model call would otherwise make us wait forever (issue #10, session
-	 * 019fc63c: sub-agent completed but never settled; only a user interrupt
+	 * model call would otherwise make us wait forever (issue #10:
+	 * a sub-agent completed but never settled; only a user interrupt
 	 * released the wait). On deadline we abort, give the child a grace window
 	 * to settle, then hard-stop it.
 	 */

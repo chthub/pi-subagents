@@ -109,8 +109,8 @@ describe("interpretEvent — message_update tool calls (v0.84 toolcall_end)", ()
 
 	it("passes multibyte text through unchanged (UTF-8 integrity)", () => {
 		assert.deepEqual(
-			expect({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "已读文件" } }),
-			[{ type: "text_delta", delta: "已读文件" }],
+			expect({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Files read" } }),
+			[{ type: "text_delta", delta: "Files read" }],
 		);
 	});
 });

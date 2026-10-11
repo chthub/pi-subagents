@@ -1,6 +1,6 @@
 # pi-subagents
 
-[English](README.md) | [中文](README.zh.md)
+[English](README.md) | [Chinese](README.zh.md)
 
 > Derived from [`@everyx/pi-subagent`](https://github.com/everyx/pi-extensions/tree/master/packages/pi-subagent) 1.3.7 (everyx/pi-extensions@3b455f1, MIT). The `@everyx/pi-ui` modules it used are inlined under `ui/`, so this package has no runtime dependency besides pi itself. Targets pi 1.1.0.
 
@@ -21,7 +21,7 @@ Pi has no built‑in sub‑agents. So heavy, parallel, or context‑heavy work c
 
 - **Quiet context** — logs, search hits, and test output stay in the child's window. You get the final result, not the churn.
 - **True parallel** — fire several background agents at once. Ready results are delivered together at the parent's next turn boundary, with a separate card per result. No worker queue or result tool.
-- **Stay in control** — `agent_send` redirects a running agent (or wakes an idle one); `agent_stop` kills it. A child's message up the tree is delivered best-effort (no ack).
+- **Stay in control** — `agent_send` redirects a running agent (or wakes an idle one); `agent_stop` stops its process. Final replies return automatically; at the default depth, children have no agent tools.
 - **Follow-ups keep context** — a finished agent stays resident by default (idle, zero tokens; ~180 MB RAM each), and `agent_send` to an agent whose process is gone resumes it from its session file. A sub-agent that needs information or a decision ends its reply with the question; the parent answers with `agent_send` and the agent continues where it stopped.
 - **Pi‑native** — rendering, sessions, and attach all reuse pi's own mechanisms; the cards look like built‑in tools because they are.
 - **Inherit or override** — a child inherits your model and thinking level by default; override it per child. A cheap model for recon, a strong one for the build.
@@ -29,7 +29,7 @@ Pi has no built‑in sub‑agents. So heavy, parallel, or context‑heavy work c
 - **Reviewable** — every session persists and is never deleted; attach any result with `pi --session <path>`.
 - **Nesting on request** — sub-agents cannot spawn by default; raise `maxDepth` in the config file to allow it.
 - **Token economy** — the system side stays lean:
-  - **System prompt** — three tools and terse guidance inject roughly 2–3KB of system prompt (token count drifts with the tokenizer).
+  - **System prompt** — tool descriptions explain operations; coordination instructions live in an on-demand skill.
   - **Notification** — the LLM sees only minimal structured data; decoration (label, usage) stays in the render layer.
   - **Results** — tail‑truncated (2000 lines / 50KB); expand any card for the full transcript.
 
@@ -45,7 +45,7 @@ pi-subagent, [`@tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagen
 | Parallelism | Uncap (one process per agent) | Queued, default 4 concurrent | spawn / turn / usage budgets |
 | Default limits | None (optional `timeoutMs`) | Graceful turn limits | turn / usage budgets |
 | Observability | pi‑native cards + widget + `pi --session` | FleetView + conversation viewer | FleetView inspector + fleet |
-| Nesting | Built‑in, no depth cap | Opt‑in, depth cap | Recursion guard |
+| Nesting | Default off; configurable `maxDepth` | Opt‑in, depth cap | Recursion guard |
 | Extras | Token economy, minimal runtime deps, no orphans on reload/crash | Memory, worktree isolation, schedule, cross‑extension RPC, event bus | Missions/scheduling, watchdog, worktree, intercom, chain orchestration |
 | Best for | Owning your own composition | A turnkey sub‑agent system | Built‑in roles + workflow orchestration |
 
@@ -91,7 +91,15 @@ Pi calls `agent_send` to steer the running agent (after its current response and
 
 ## Enabling the tools
 
-The three agent tools are registered **inactive**: a conversation that never delegates carries no schema or guidelines for them. Only a parameterless `subagent_enable` tool is always present; the model calls it when you ask for sub-agents (or a task clearly benefits), and the tools appear on the next request. The activation is recorded in the transcript, so a resumed session keeps them.
+The three agent tools are registered **inactive**: a conversation that never delegates carries no schema for them. The parameterless `subagent_enable` activates them for the next model request. The activation is recorded in the transcript, so a resumed session keeps them.
+
+## Coordination skill
+
+The package includes [`pi-subagents-workflow`](skills/pi-subagents-workflow/SKILL.md), the single source of instructions for task boundaries, parallel work, file ownership, follow-ups, and checks. It does not define preset agent roles or enforce a workflow at runtime.
+
+When the whole package is loaded, a new session sees the skill's name, description, and path immediately, independently of `subagent_enable`. The full instructions enter context only when the model reads the skill or you invoke `/skill:pi-subagents-workflow`. Package skill filters and `--no-skills` can disable discovery. Loading only `index.ts` with `-e` does not include the packaged skill.
+
+Tool descriptions explain what each call does; the skill explains how the main agent coordinates work. Children receive a short task suffix explaining automatic final replies, even if they do not load the skill.
 
 ## Agent list and agent view
 
@@ -101,7 +109,7 @@ Below the editor, one line per sub-agent of this conversation — running, idle,
  ⠋ @jude  read-only check   12s  bash: ls -la
  ‖ @yara  keeper            idle
  ✓ @max   auth module       1m3s
- 点击进入 · /agents
+ Click to open · /agents
 ```
 
 - **Click a line** (fullscreen TUI mode, pi's default) or run **`/agents`** (`/agents max` opens one directly) to open that agent's full-screen view: its whole conversation rendered with pi's own components, streaming live while it runs.
@@ -149,7 +157,7 @@ The directory lives **outside** pi's standard session tree so `pi -r` (resume) s
 | `timeoutMs` | number | none | Optional deadline (ms). On firing, the extension stops the child, waits for it to settle, and shuts down gracefully. |
 | `persistent` | boolean | `true` (root) / `false` (inside a sub-agent) | Keep the child resident (idle, zero tokens) after completion so follow-ups skip the restart; `agent_stop` tears it down. With `false` it exits when done — `agent_send` still resumes it from its session. |
 
-For questions, revisions, additional tests, and later stages of the same task, prefer `agent_send` to the original relevant agent—even if it needs to resume from its saved session. Spawn a new agent for independent parallel work, a fresh-context independent review, or when existing agents are unsuitable, not merely because a turn finished.
+The final reply, including a blocking question, returns automatically. With the default `maxDepth=1`, children have no agent tools; the parent handles coordination.
 
 #### `agent_stop` — cancel an agent task
 
@@ -157,7 +165,7 @@ For questions, revisions, additional tests, and later stages of the same task, p
 |---|---|
 | `agent_id` | **required** — the id `agent_spawn` returned. Cancels a running task and stops its process, or stops an idle process when explicitly requested. Graceful shutdown (stdin EOF); no new completion notification. |
 
-Use `agent_stop` for cancellation, an explicit stop request, or incorrect execution that must halt immediately. Ordinary corrections use `agent_send`; do not routinely stop and recreate agents after completion. Idle agents consume no model tokens and close with their host session. Stopping neither deletes saved conversations nor rolls back files or submitted jobs; inspect actual state before resuming.
+Stopping neither deletes saved conversations nor rolls back file changes or cancels submitted jobs. Idle processes consume no model tokens and close with their host session.
 
 #### `agent_send` — message an agent in the tree
 
@@ -166,11 +174,9 @@ Use `agent_stop` for cancellation, an explicit stop request, or incorrect execut
 | `to` | **required** — the agent id agent_spawn gave you (a short human name like `max`), or `"@parent"` to message the session that spawned you. |
 | `message` | **required** — the message text; steered after the target's current response/tool batch, wakes an idle agent, or resumes a finished one from its session file (its answer arrives as a notification). |
 
-`agent_send` starts more work, not a silent note. Use it for follow-up work, necessary corrections, missing information, or answers—not thanks, receipts, status-only announcements, or telling an already-finished agent to finish. Completion notifications need no acknowledgement; integrate them into the work instead of issuing repeated status-only replies.
+A message to an idle child starts a new model turn; a message to an exited child resumes its saved conversation. The final reply returns automatically.
 
-Messages travel the parent↔child edges of the agent tree: a direct child is delivered straight down, `@parent` goes up, and cross‑level/sibling messages are forwarded through the parent LLM's context along the way.
-
-The LLM is guided by `promptSnippet` + `promptGuidelines` (system‑prompt injection): when to delegate, to keep prompts self‑contained, and to never poll.
+The tool addresses only direct children, or `@parent` when the caller has agent tools. It does not deliver directly to siblings; cross-level coordination requires forwarding by the parent.
 
 ## Advanced
 
@@ -197,7 +203,7 @@ Sub‑agent won't see any other tools. Read‑only exploration with a cheaper mo
 Every sub‑agent is a resident `pi --mode rpc` child with a persisted session:
 
 - **Foreground** — `agent_spawn` waits for the child to settle, fetches the final output, then closes stdin (graceful shutdown).
-- **Background results** — `agent_spawn` returns immediately. Each child settlement queues a `subagent-notification`. While the parent is busy, all ready results enter at `turn_end`, with `agent_before_settle` as a fallback; they do not wait in the follow-up queue. Idle delivery collects the ready batch for one event-loop tick, appends separate cards, and starts only one model run. It never waits for unfinished children.
+- **Background results** — `agent_spawn` returns immediately. Each child settlement queues a `subagent-notification`. While the parent is busy, all ready results enter together after the current response and tool batch, before the next model request—the steering delivery point, implemented through `turn_end` with `agent_before_settle` as a fallback. Delivery does not interrupt generation or tools, use the follow-up queue, or depend on the global steering queue mode. Idle delivery collects the ready batch for one event-loop tick, keeps separate cards, and starts only one model run. It never waits for unfinished children. This prevents queue-induced delay, not reports becoming outdated after subsequent file changes.
 - **Send/stop** — `agent_send` uses steering in both directions (after the current response/tool batch, before the next request); idle children wake. `agent_stop` closes stdin for a graceful shutdown, without a new completion notification; already queued results remain deliverable.
 - **Resident idle** — by default the child stays resident after completion (idle, zero tokens). A later `agent_send` wakes it to continue the same context; `agent_stop` tears it down. The completion notification and list row carry the `idle` marker.
 - **Resume** — `agent_send` to a direct child whose process is gone starts `pi --mode rpc --session <path>` with the message as its next turn; the answer comes back as a notification.

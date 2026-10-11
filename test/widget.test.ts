@@ -158,7 +158,14 @@ describe("AgentWidget — the bottom agent list", () => {
 	it("every line fits the width, CJK labels included", () => {
 		const { ui, lines } = capture();
 		const w = new AgentWidget(ui, new Roster(), () => {});
-		w.add(agentRow("jude", "后台只读目录检查，确认没有修改任何文件并返回第一层条目".repeat(2)));
+		w.add(
+			agentRow(
+				"jude",
+				"\u540e\u53f0\u53ea\u8bfb\u76ee\u5f55\u68c0\u67e5，\u786e\u8ba4\u6ca1\u6709\u4fee\u6539\u4efb\u4f55\u6587\u4ef6\u5e76\u8fd4\u56de\u7b2c\u4e00\u5c42\u6761\u76ee".repeat(
+					2,
+				),
+			),
+		);
 		w.updateActivity("jude", { kind: "tool", name: "bash", args: "ls -la /work/project" });
 		for (const width of [30, 60, 100]) {
 			for (const line of lines(width)) {

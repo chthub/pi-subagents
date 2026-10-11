@@ -26,6 +26,7 @@
   "files": [
     "*.ts",
     "ui/*.ts",
+    "skills/",
     "README.md",
     "README.zh.md",
     "SPEC.md",
@@ -34,6 +35,9 @@
   "pi": {
     "extensions": [
       "./index.ts"
+    ],
+    "skills": [
+      "./skills"
     ]
   },
   "peerDependencies": {

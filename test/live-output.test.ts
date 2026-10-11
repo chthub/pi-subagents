@@ -43,19 +43,19 @@ function card() {
 	return { calls, sink };
 }
 
-describe("createLiveChannels — 实时输出落到哪些显示面", () => {
-	it("前台 spawn（卡片开着）：widget 与 tree 同样收到 —— 唤醒的 resident agent 只有它们", () => {
+describe("createLiveChannels — live output destinations", () => {
+	it("foreground spawn with an open card also updates widget and tree for resident wakes", () => {
 		const s = surfaces();
 		const c = card();
 		const live = createLiveChannels({ surfaces: s.surfaces, card: c.sink });
 
 		live.onDelta(agent({ kind: "text", text: "hi" }), "hi");
 
-		assert.deepEqual(s.calls, ["widget:a1:text", "tree:a1"], "卡片之外两个面都要喂");
+		assert.deepEqual(s.calls, ["widget:a1:text", "tree:a1"], "both destinations outside the card must receive updates");
 		assert.deepEqual(c.calls, ["card:delta:hi"]);
 	});
 
-	it("后台 spawn（没有卡片）：widget 与 tree 收到，卡片不参与", () => {
+	it("background spawn without a card updates widget and tree", () => {
 		const s = surfaces();
 		const live = createLiveChannels({ surfaces: s.surfaces });
 
@@ -64,7 +64,7 @@ describe("createLiveChannels — 实时输出落到哪些显示面", () => {
 		assert.deepEqual(s.calls, ["widget:a1:text", "tree:a1"]);
 	});
 
-	it("thinking/tool 走 activity 通道：卡片收到，text 不重复进卡片", () => {
+	it("thinking and tools use the activity channel without duplicating text on the card", () => {
 		const s = surfaces();
 		const c = card();
 		const live = createLiveChannels({ surfaces: s.surfaces, card: c.sink });
@@ -73,25 +73,29 @@ describe("createLiveChannels — 实时输出落到哪些显示面", () => {
 		live.onActivity(agent({ kind: "text", text: "x" }), { kind: "text", text: "x" });
 
 		assert.deepEqual(s.calls, ["widget:a1:tool", "tree:a1", "widget:a1:text", "tree:a1"]);
-		assert.deepEqual(c.calls, ["card:activity:tool"], "text 由 onDelta 送，卡片不重复");
+		assert.deepEqual(c.calls, ["card:activity:tool"], "onDelta delivers text without duplicating it on the card");
 	});
 
-	it("widget 每次现取：构造时还没有、后来才建出来，后续更新要到位", () => {
+	it("widget lookup stays live when the widget is created after construction", () => {
 		const calls: string[] = [];
 		let widget: { updateActivity(id: string, a: AgentActivity | undefined): void } | undefined;
 		const live = createLiveChannels({
 			surfaces: { getWidget: () => widget, tree: { activity: (a) => calls.push(`tree:${a.agentId}`) } },
 		});
 
-		live.onDelta(agent({ kind: "text", text: "a" }), "a"); // 此刻 widget 还不存在
+		live.onDelta(agent({ kind: "text", text: "a" }), "a"); // the widget does not exist yet
 		widget = { updateActivity: (id, a) => calls.push(`widget:${id}:${a?.kind ?? "none"}`) };
 		live.onDelta(agent({ kind: "text", text: "b" }), "b");
 
 		// Second update: widget first (it is in hand now), then the tree.
-		assert.deepEqual(calls, ["tree:a1", "widget:a1:text", "tree:a1"], "构造期捕获引用会永远拿不到 widget");
+		assert.deepEqual(
+			calls,
+			["tree:a1", "widget:a1:text", "tree:a1"],
+			"capturing the reference at construction would miss the later widget",
+		);
 	});
 
-	it("没有 widget（非 TUI）：tree 照旧，不炸", () => {
+	it("without a widget, tree updates still work", () => {
 		const calls: string[] = [];
 		const live = createLiveChannels({ surfaces: { tree: { activity: (a) => calls.push(`tree:${a.agentId}`) } } });
 
@@ -100,7 +104,7 @@ describe("createLiveChannels — 实时输出落到哪些显示面", () => {
 		assert.deepEqual(calls, ["tree:a1"]);
 	});
 
-	it("agent 还没吐过内容（getLatestActivity 为空）：旧行为一致，不伪造活动", () => {
+	it("an agent with no latest activity does not invent an update", () => {
 		const s = surfaces();
 		const c = card();
 		const live = createLiveChannels({ surfaces: s.surfaces, card: c.sink });

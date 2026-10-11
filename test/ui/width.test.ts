@@ -13,7 +13,7 @@ describe("capPlain", () => {
 		assert.ok(out.endsWith("\u2026"));
 	});
 	it("measures CJK by terminal columns, not chars", () => {
-		const out = capPlain("调".repeat(30), 20);
+		const out = capPlain("\u8c03".repeat(30), 20);
 		assert.ok(visibleWidth(out) <= 20);
 		assert.ok(out.endsWith("\u2026"));
 	});

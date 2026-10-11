@@ -12,7 +12,7 @@
  *   name-gen.ts       — short human-readable agent ids (tested)
  *   spawn-session.ts  — spawn lifecycle (fg/bg/persistent) + outcome classification (tested)
  *   nested-fold.ts    — foreground-card nested-subtree meta counters (tested)
- *   tree-display.ts   — subtree display anchor: fold / forward / widget (显示面统一规则)
+ *   tree-display.ts   — subtree display anchor: fold / forward / widget (single-display rule)
  *   notification.ts   — completion-notification payloads
  *   completion-inbox.ts — boundary-batched delivery, one wake for ready results
  *   types.ts          — shared tool-output / notification shapes
@@ -165,7 +165,7 @@ function widgetSurface(): WidgetSurface | null {
  *   • root + foreground child → folded into that card's nested meta counters
  * A foreground card's subtree therefore never reaches the widget, and a
  * background row's subtree never leaks into a card — one subtree, one
- * surface (SPEC: 显示面统一规则).
+ * surface (SPEC: single-display rule).
  */
 function createTreeTelemetry(hasParent: boolean) {
 	/** Ids reported as added — guards activity/remove so unknown ids never
@@ -238,23 +238,17 @@ const SpawnModelField = Type.Optional(
 	Type.String({
 		description:
 			'Model for the sub-agent — provider/modelId or fuzzy name (e.g. "haiku", "sonnet"). ' +
-			"Omit to inherit your current model — don't switch the model unless the task " +
-			"explicitly requires it.",
+			"Omit to inherit your current model.",
 	}),
 );
 const SpawnThinkingField = Type.Optional(
 	StringEnum(["off", "minimal", "low", "medium", "high", "xhigh", "max"], {
-		description:
-			'Reasoning intensity for the sub-agent ("off"…"max"). ' +
-			"Omit to inherit your current thinking level — don't change it unless the task " +
-			"requires a different depth.",
+		description: 'Reasoning intensity for the sub-agent ("off"…"max"). Omit to inherit your current thinking level.',
 	}),
 );
 const SpawnToolsField = Type.Optional(
 	Type.Array(Type.String(), {
-		description:
-			"Tool allowlist for the sub-agent. Omit to grant all tools. For read-only " +
-			"exploration, restrict to read/grep/find/ls and consider a cheaper model.",
+		description: "Tool allowlist for the sub-agent. Omit to grant all tools.",
 	}),
 );
 const SpawnTimeoutField = Type.Optional(
@@ -262,9 +256,7 @@ const SpawnTimeoutField = Type.Optional(
 		minimum: 1,
 		description:
 			"Optional wall-clock deadline for the whole task, in milliseconds. Omit for no " +
-			"time limit (the default — the child runs until it finishes or is stopped). " +
-			"Pass a value when you want to bound a risky/looping task; on expiry the agent is " +
-			"stopped and the call reports stopped.",
+			"time limit. On expiry the agent is stopped and the call reports stopped.",
 	}),
 );
 
@@ -305,8 +297,7 @@ export function buildSpawnParamsSchema(hasParent: boolean): ReturnType<typeof Ty
 						Type.Boolean({
 							description:
 								"Default true: return an agent id immediately; the completion notification " +
-								"carries the result. Set false to block until the result is ready — only when you " +
-								"cannot do anything useful before it arrives.",
+								"carries the result. Set false to block until the result is ready.",
 						}),
 					),
 				}),
@@ -418,9 +409,9 @@ async function handleMessage(
  * answers with agent_send, which resumes the child with its context.
  */
 const CHILD_PROMPT_NOTE =
-	"\n\n(If you are blocked on missing information or a decision, pause work and end this reply with the question. " +
-	"The answer will resume you with this context. When finished, return your deliverable directly; " +
-	"it is returned to your parent automatically, so do not send a separate completion report.)";
+	"\n\n(Your final reply is returned to your parent automatically. If missing information prevents you from " +
+	"continuing, ask the question and end this reply; your parent's answer will resume this conversation. " +
+	"When finished, return your result directly. Do not send a separate completion report.)";
 
 /** The tools subagent_enable activates (registered with defaultActive: false). */
 const SUBAGENT_TOOL_NAMES = ["agent_spawn", "agent_stop", "agent_send"] as const;
@@ -532,10 +523,9 @@ export default function (pi: ExtensionAPI) {
 		label: "Enable Sub-agents",
 		description:
 			"Enable the sub-agent tools (agent_spawn, agent_stop, agent_send). Does not spawn anything. " +
-			"Enabled tools are available on the next model request.",
-		promptSnippet: HAS_PARENT
-			? "Call subagent_enable before delegating work to sub-agents of your own"
-			: "Call subagent_enable when the user asks for sub-agents, or a task would flood your context with verbose output or splits into independent parallel parts",
+			"Enabled tools are available on the next model request. " +
+			"For coordination rules, read the pi-subagents-workflow skill if available.",
+		promptSnippet: "Activate agent_spawn, agent_send, and agent_stop",
 		parameters: Type.Object({}, { additionalProperties: false }),
 		async execute() {
 			const registered = new Set(pi.getAllTools().map((tool) => tool.name));
@@ -559,29 +549,17 @@ export default function (pi: ExtensionAPI) {
 		name: "agent_spawn",
 		label: "Agent Spawn",
 		defaultActive: false,
-		description: HAS_PARENT
-			? "Spawn a sub-agent with its own context. Only foreground spawns are available here: " +
-				"the call waits and returns the result. Independent foreground calls can run concurrently. " +
-				"Persistent helpers cannot outlive their host session."
-			: "Spawn a sub-agent with its own context. By default it runs in the background: " +
-				"the call returns an agent id immediately and the result arrives automatically. " +
-				"run_in_background: false waits and returns the result directly. After completion, " +
-				"use agent_send with the original id to continue the saved conversation.",
-		promptSnippet: "Spawn a sub-agent for independent parallel work or context isolation",
-		promptGuidelines: [
-			"Before spawning, consider existing relevant sub-agents. For follow-up questions, revisions, additional tests, or later stages of the same task, prefer agent_send with the original id, including agents whose saved sessions can be resumed. Do not create a replacement merely because the previous turn finished.",
-			"Spawn a new agent for independent parallel work, an independent review needing fresh context, or when existing agents are unsuitable. Delegate context-heavy work to keep verbose intermediate output out of your own context.",
-			"Write self-contained task prompts: a new agent does not have your full context. Include necessary paths, constraints, and expected deliverables.",
-			...(HAS_PARENT
-				? [
-						"For independent parallel work, issue several foreground agent_spawn calls together; each returns its result directly.",
-					]
-				: [
-						"After background spawning, keep working or end your reply to await results. Ready results arrive at the next turn boundary or wake an idle parent; do not poll or repeatedly ask agents to finish.",
-					]),
-			"Completion notifications need no acknowledgement. Integrate results into your work; do not send receipt-only messages to agents or repeatedly tell the user the conclusion is unchanged.",
-			"Long outputs are truncated for your context; when that happens the result carries the full-output file path — read it when you need everything.",
-		],
+		description:
+			"Spawn a sub-agent with its own context. Its final reply is returned automatically, including questions. " +
+			(HAS_PARENT
+				? "Only foreground spawns are available here: the call waits and returns the result. " +
+					"Foreground calls can run concurrently; children cannot outlive their host session. "
+				: "Background spawns return an agent id immediately. Ready replies enter together after the current " +
+					"response and tool batch, before the next model request; an idle parent wakes once for the ready batch. " +
+					"Foreground spawns wait and return the result directly. ") +
+			"At the default maxDepth=1, children have no agent tools. " +
+			"Large results are truncated with a path to the full output.",
+		promptSnippet: "Start a sub-agent with an independent context",
 		parameters: SpawnParamsSchema,
 
 		async execute(_toolCallId, raw, signal, onUpdate, ctx) {
@@ -649,7 +627,7 @@ export default function (pi: ExtensionAPI) {
 			// source (RPC event handler); the callbacks here only refresh the
 			// live card via onUpdate.
 			let streamed = "";
-			// Where my child's subtree telemetry lands (SPEC: 显示面统一规则) —
+			// Where my child's subtree telemetry lands (SPEC: single-display rule) —
 			// fold into THIS card while it's open, forward to my parent, or
 			// surface on the root widget. One module owns the whole decision.
 			const subtree = createSubtreeDisplay({
@@ -958,7 +936,7 @@ export default function (pi: ExtensionAPI) {
 							{
 								type: "text",
 								text: outcome.resident
-									? `${truncateForContext(outcome.output)}${maybeWriteFullOutput(agent.agentId, outcome.output)}\n\n(agent @${agent.agentId} has completed and is idle; use agent_send for related follow-up work. No acknowledgement is needed.)`
+									? `${truncateForContext(outcome.output)}${maybeWriteFullOutput(agent.agentId, outcome.output)}\n\n(agent @${agent.agentId} is idle and its saved conversation can be continued with agent_send.)`
 									: truncateForContext(outcome.output) + maybeWriteFullOutput(agent.agentId, outcome.output),
 							},
 						],
@@ -991,15 +969,9 @@ export default function (pi: ExtensionAPI) {
 		defaultActive: false,
 		description:
 			"Cancel a sub-agent's running task and stop its process; for an idle agent, only the process is stopped. " +
-			"Saved conversations are not deleted and file changes are not rolled back. " +
+			"Saved conversations are not deleted, file changes are not rolled back, and submitted jobs are not cancelled. " +
 			"Deliberate stops produce no new completion notification; already completed results remain deliverable.",
-		promptSnippet: "Cancel a sub-agent task",
-		promptGuidelines: [
-			"Use agent_stop when a task is cancelled, the user explicitly requests a stop, or incorrect execution must be halted immediately.",
-			"For ordinary course corrections or additional constraints, prefer agent_send; do not default to stopping and respawning.",
-			"Do not routinely stop agents after they finish. Idle agents consume no model tokens and close automatically when their host session exits.",
-			"Stopping is not a rollback: partial files or submitted jobs may remain. Check actual state before resuming work.",
-		],
+		promptSnippet: "Stop a sub-agent process",
 		parameters: StopParamsSchema,
 
 		async execute(_toolCallId, raw, _signal, onUpdate) {
@@ -1064,16 +1036,11 @@ export default function (pi: ExtensionAPI) {
 		label: "Send Message",
 		defaultActive: false,
 		description:
-			"Send a task request, necessary information, or an answer to an existing sub-agent or your parent. " +
-			"Uses steering: delivered after the target's current response and tool batch, before its next model request. " +
-			"Wakes idle children or resumes exited children with recoverable saved sessions in their original context. " +
-			"This is not a silent note.",
-		promptSnippet: "Continue an existing sub-agent's work or send necessary coordination",
-		promptGuidelines: [
-			"Use agent_send for follow-up work, necessary corrections, missing information, or answers.",
-			"Do not send thanks, receipts, status-only announcements, or ask an already-finished agent to wrap up; these messages trigger extra replies.",
-			"When a sub-agent ends its reply with a question because it lacks information or a decision, answer with agent_send. It continues with its saved context and its result is returned automatically.",
-		],
+			"Send a message to a direct child, or to @parent when this tool is available in a child. " +
+			"Delivered after the target's current response and tool batch, before its next model request. " +
+			"Starts a new model turn for idle children or resumes exited children with recoverable saved sessions. " +
+			"The child's final reply is returned automatically.",
+		promptSnippet: "Send a message to an existing sub-agent",
 		parameters: SendParamsSchema,
 
 		async execute(_toolCallId, raw, _signal, onUpdate, ctx) {
