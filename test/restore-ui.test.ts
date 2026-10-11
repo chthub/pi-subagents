@@ -12,6 +12,7 @@ function setup() {
 	let registrations = 0;
 	const ctx = {
 		mode: "tui",
+		isIdle: () => true,
 		cwd: "/work",
 		sessionManager: manager,
 		ui: {

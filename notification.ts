@@ -9,7 +9,7 @@
  * the shape has a single producer, so it cannot drift by hand.
  */
 
-import { type ExtensionAPI, truncateTail } from "@earendil-works/pi-coding-agent";
+import { type CustomMessageEntryDraft, truncateTail } from "@earendil-works/pi-coding-agent";
 import type { AgentCompletion } from "./agent-process.js";
 import type { RegisteredAgent } from "./registry.js";
 import type { NotificationDetails } from "./types.js";
@@ -37,9 +37,13 @@ export function maybeWriteFullOutput(agentId: string, output: string): string {
 	return stashPath ? truncationMarker(stashPath) : "";
 }
 
-/** Deliver a completion notification: LLM JSON as follow-up + user card. */
-export function notifyCompletion(pi: ExtensionAPI, agent: RegisteredAgent, completion: AgentCompletion): void {
-	const details: NotificationDetails = {
+/** One result/card; delivery and batching are owned by completion-inbox.ts. */
+export function completionNotification(
+	agent: RegisteredAgent,
+	completion: AgentCompletion,
+): CustomMessageEntryDraft & { details: NotificationDetails & { completionId: string } } {
+	const details = {
+		completionId: completion.completionId,
 		status: completion.status,
 		agent_id: agent.agentId,
 		label: agentTitle(agent.agentId, agent.label),
@@ -60,26 +64,25 @@ export function notifyCompletion(pi: ExtensionAPI, agent: RegisteredAgent, compl
 		sessionId: completion.sessionId,
 	};
 
-	pi.sendMessage(
-		{
-			customType: "subagent-notification",
-			content: JSON.stringify({
-				status: completion.status,
-				agent_id: `@${agent.agentId}`,
-				// LLM-context protection: cap the visible result (tail 2000 lines /
-				// 50KB, bash parity) — the full text lives in details.result (card
-				// body, never enters LLM context) and the session file.
-				result: truncateForContext(completion.output) + maybeWriteFullOutput(agent.agentId, completion.output),
-				// Only a completed persistent agent stays resident (idle) — a
-				// failed follow-up is cleaned up, so no idle claim.
-				idle: agent.persistent && completion.status === "completed" ? true : undefined,
-				// Resume entry point: sub-agent sessions live outside `pi -r`;
-				// attach with `pi --session <path>`.
-				session_path: completion.sessionPath ?? null,
-			}),
-			display: true,
-			details,
-		},
-		{ deliverAs: "followUp", triggerTurn: true },
-	);
+	return {
+		type: "custom_message",
+		customType: "subagent-notification",
+		content: JSON.stringify({
+			completion_id: completion.completionId,
+			status: completion.status,
+			agent_id: `@${agent.agentId}`,
+			// LLM-context protection: cap the visible result (tail 2000 lines /
+			// 50KB, bash parity) — the full text lives in details.result (card
+			// body, never enters LLM context) and the session file.
+			result: truncateForContext(completion.output) + maybeWriteFullOutput(agent.agentId, completion.output),
+			// Only a completed persistent agent stays resident (idle) — a
+			// failed follow-up is cleaned up, so no idle claim.
+			idle: agent.persistent && completion.status === "completed" ? true : undefined,
+			// Resume entry point: sub-agent sessions live outside `pi -r`;
+			// attach with `pi --session <path>`.
+			session_path: completion.sessionPath ?? null,
+		}),
+		display: true,
+		details,
+	};
 }

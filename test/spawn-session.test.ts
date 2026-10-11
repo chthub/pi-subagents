@@ -22,7 +22,12 @@ function fakeAgent(overrides: Partial<SpawnSessionAgent> & { completion?: AgentC
 			return { ok: true };
 		},
 		waitForCompletion: async () =>
-			completion ?? { status: "completed", output: "done output", stats: { tokens: 1, toolUses: 0, durationMs: 5 } },
+			completion ?? {
+				completionId: "test:1",
+				status: "completed",
+				output: "done output",
+				stats: { tokens: 1, toolUses: 0, durationMs: 5 },
+			},
 		stop: async () => {
 			calls.push("stop");
 		},
@@ -78,7 +83,12 @@ describe("runSpawnSession", () => {
 
 	it("failed completion → finished/failed with stoppedByControl surfaced", async () => {
 		const agent = fakeAgent({
-			completion: { status: "failed", output: "", stats: { tokens: 0, toolUses: 0, durationMs: 1 } },
+			completion: {
+				completionId: "test:1",
+				status: "failed",
+				output: "",
+				stats: { tokens: 0, toolUses: 0, durationMs: 1 },
+			},
 		});
 		const f = finishedOf(await runSpawnSession(agent, { task: "do", runInBackground: false }));
 		assert.equal(f.status, "failed");
@@ -88,12 +98,22 @@ describe("runSpawnSession", () => {
 		const controller = new AbortController();
 		const agent = fakeAgent({
 			status: "running",
-			completion: { status: "stopped", output: "partial", stats: { tokens: 1, toolUses: 0, durationMs: 9 } },
+			completion: {
+				completionId: "test:1",
+				status: "stopped",
+				output: "partial",
+				stats: { tokens: 1, toolUses: 0, durationMs: 9 },
+			},
 		});
 		agent.waitForCompletion = async () => {
 			controller.abort(); // user cancel mid-run → guard stops the live agent
 			agent.stoppedByControl = true;
-			return { status: "stopped", output: "partial", stats: { tokens: 1, toolUses: 0, durationMs: 9 } };
+			return {
+				completionId: "test:1",
+				status: "stopped",
+				output: "partial",
+				stats: { tokens: 1, toolUses: 0, durationMs: 9 },
+			};
 		};
 		const f = finishedOf(
 			await runSpawnSession(agent, { task: "do", runInBackground: false, signal: controller.signal }),
@@ -119,7 +139,12 @@ describe("runSpawnSession", () => {
 	it("persistent but failed → torn down like any failure", async () => {
 		const agent = fakeAgent({
 			persistent: true,
-			completion: { status: "failed", output: "x", stats: { tokens: 0, toolUses: 0, durationMs: 1 } },
+			completion: {
+				completionId: "test:1",
+				status: "failed",
+				output: "x",
+				stats: { tokens: 0, toolUses: 0, durationMs: 1 },
+			},
 		});
 		const f = finishedOf(await runSpawnSession(agent, { task: "do", runInBackground: false }));
 		assert.equal(f.resident, false);

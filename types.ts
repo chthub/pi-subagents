@@ -56,14 +56,16 @@ export type SubagentDetails = {
 
 /**
  * Notification-delivery details (rendering side). Populated by
- * notifyCompletion() in notification.ts, consumed by renderNotification().
+ * completionNotification() in notification.ts, consumed by renderNotification().
  * The LLM sees only the JSON `content` block; `details` never enter
  * context (verified against pi's convertToLlm).
  */
 export interface NotificationDetails {
+	/** Absent in older persisted cards. */
+	completionId?: string;
 	status: string;
 	agent_id: string;
-	/** Required — always passed by notifyCompletion (AgentProcess.label). */
+	/** Required — always passed by completionNotification (AgentProcess.label). */
 	label: string;
 	/** Resolved model string, or default when omitted. */
 	model?: string;

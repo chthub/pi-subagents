@@ -128,6 +128,7 @@ rpc-client.ts      — 状态化薄 JSONL 客户端（spawn + 事件流 + 退出
 event-interpret.ts — 原始 RpcEvent → AgentEvent 适配层（纯函数）
 agent-process.ts   — AgentProcess：一个常驻 rpc 子进程的语义封装
 notification.ts    — 完成通知 payload 构造（LLM JSON 截断/stash + details 卡形状单点）
+completion-inbox.ts — 会话级结果收件箱、边界批量交付、空闲单次唤醒
 tree-display.ts    — 子树显示面（显示面统一规则锚点：fold/forward/widget 决策 + 计数）
 registry.ts        — AgentRegistry：运行中 Agent 生命周期 + 点对点投递 + 完成策略
 model.ts           — model spec → resolved model（纯函数）
@@ -182,7 +183,8 @@ queued → running ──→ completed（通知）
 父→子：现有 rpc（prompt / steer，见 RPC 协议投递策略）
 子→父：extension_ui_request（rpc 模式 setStatus 携带 JSON，专属 key "pi-subagent-msg"；
         fire-and-forget 尽力投递，无确认——本地 rpc 通行可靠）
-注入/唤醒：pi.sendMessage（deliverAs: "steer"|"followUp" + triggerTurn: true）
+主动消息：pi.sendMessage（deliverAs: "steer" + triggerTurn: true）
+自动结果：turn_end / agent_before_settle 批量 entries；空闲时独立卡片 + 一次 steer 唤醒
 ```
 
 - **零 socket、零文件写入、零轮询**——纯内存事件流
@@ -204,11 +206,16 @@ queued → running ──→ completed（通知）
 
 ### 完成通知
 
-- `pi.sendMessage` → `deliverAs: "followUp"` + `triggerTurn: true`
-- content：`{status, agent_id, result, session_path}`（LLM 可见）；persistent 时追加 `idle: true`
+- 就绪结果先进入会话级收件箱；主代理忙碌时在 `turn_end` 批量追加 `custom_message` entries，必要时 `continue: true`；`agent_before_settle` 处理结束边界附近的结果。不等待其他子代理，不改 Pi 全局队列设置。
+- 主代理空闲时，用一个 `setImmediate` 合并已就绪回调，先静默追加前面的结果卡，最后一张以 `deliverAs: "steer", triggerTurn: true` 启动一次处理。卡片数不等于模型调用数。
+- content：`{completion_id, status, agent_id, result, session_path}`（LLM 可见）；persistent 时追加 `idle: true`
+- `completion_id` = 进程实例 UUID + settlement 序号；同事件去重，不按 agent 覆盖、不按文本去重、不过滤“收到”。主动 stop 不生成新完成通知，也不撤销已排队结果。
+- 用户中断／错误时仅保存结果，不请求继续；后续空闲结果同样静默保存，直到下一次正常运行。关闭／切换会话取消定时回调，旧会话 sender 不能投进新会话。
+- 编排提示（`index.ts` 中的工具描述、snippet、guidelines、参数与子任务附言均用英文）：`agent_spawn` 负责“相关后续任务优先复用，独立并行／独立复核才新建”的原则；`agent_send` 只用于有实质内容的协调，禁止纯回执、纯状态通报和反复催收尾；`agent_stop` 定位为取消任务，不做完成后的例行清理，普通纠正不停止重建。
+- 子任务附言明确“暂停工作、以问题结束本轮回复”，避免将 stop 误读为工具调用；完成交付自动返回，不重复主动回报。前台常驻结果提示说明可以继续相关工作，但无需确认。空闲代理零模型 token，随宿主退出关闭；停止不删除对话或撤销文件／已提交作业，恢复前核对实际状态。
 - details：渲染数据，不进 LLM 上下文；persistent 通知卡追加 idle 状态词
-- spawn 失败不投递通知：isError 工具结果已经同时告知 LLM 和用户，followUp 通知会重复
-- **唤醒轮次同样投递**（2026-08-22）：persistent 代理被 agent_send 唤醒并成功完成后，输出经 onIdle → notifyCompletion 回到派发者上下文——与首轮对称（否则 `agent_send` 只回 "delivered"，答案落在父看不见的地方）。主动 stop（stoppedByControl）保持静默；失败唤醒照旧报 failed
+- spawn 失败不投递通知：isError 工具结果已经同时告知 LLM 和用户，额外完成通知会重复
+- **唤醒轮次同样投递**（2026-08-22）：persistent 代理被 agent_send 唤醒并成功完成后，输出经 onIdle → completionNotification → 收件箱回到派发者上下文——与首轮对称（否则 `agent_send` 只回 "delivered"，答案落在父看不见的地方）。主动 stop（stoppedByControl）保持静默；失败唤醒照旧报 failed
 
 ### Graceful turn limits
 

@@ -587,6 +587,21 @@ describe("AgentProcess — persistent / in-tree messages", () => {
 		assert.equal(agent.status, "completed");
 	});
 
+	it("completion ids are stable for one settlement and distinct across wakes/processes", async () => {
+		const { agent, fake } = makeAgent({ cwd: "/tmp", persistent: true });
+		await agent.spawnAndSend("do it");
+		const done = agent.waitForCompletion();
+		fake.emitSettled();
+		const first = await done;
+		assert.equal(first.completionId, agent.completionId);
+		assert.equal((await agent.waitForCompletion()).completionId, first.completionId);
+		await agent.sendMessage("a real follow-up");
+		fake.emitSettled();
+		assert.notEqual(agent.completionId, first.completionId);
+		const other = makeAgent({ cwd: "/tmp", agentId: agent.agentId });
+		assert.notEqual(other.agent.completionId, agent.completionId);
+	});
+
 	it("onIdle fires with completed when a woken persistent agent settles", async () => {
 		const outcomes: string[] = [];
 		const { agent, fake } = makeAgent({ cwd: "/tmp", persistent: true, onIdle: (o) => outcomes.push(o) });

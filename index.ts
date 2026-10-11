@@ -13,7 +13,8 @@
  *   spawn-session.ts  — spawn lifecycle (fg/bg/persistent) + outcome classification (tested)
  *   nested-fold.ts    — foreground-card nested-subtree meta counters (tested)
  *   tree-display.ts   — subtree display anchor: fold / forward / widget (显示面统一规则)
- *   notification.ts   — completion-notification payloads (notifyCompletion)
+ *   notification.ts   — completion-notification payloads
+ *   completion-inbox.ts — boundary-batched delivery, one wake for ready results
  *   types.ts          — shared tool-output / notification shapes
  *   views.ts          — tool card views (single source for the three cards)
  *   card.ts           — notification card wrappers (via pi-ui)
@@ -26,7 +27,7 @@
  * Every sub‑agent is a resident `pi --mode rpc` child with a persisted
  * session. Foreground agent_spawn calls block until completion; background
  * calls return an agent_id immediately and deliver a completion notification
- * (`customType: "subagent-notification"`, deliverAs "followUp") carrying the
+ * (`customType: "subagent-notification"`, batched at turn boundaries) carrying the
  * final output. agent_send messages flow along tree edges (parent↔child);
  * persistent agents stay resident (idle, zero token) and can be woken by a
  * message.
@@ -44,15 +45,16 @@ import {
 	type ToolRenderers,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { AgentProcess } from "./agent-process.js";
+import { type AgentCompletion, AgentProcess } from "./agent-process.js";
 import { AgentView } from "./agent-view.js";
+import { registerCompletionInbox } from "./completion-inbox.js";
 import { canSpawnAt, envInt, loadConfig } from "./config.js";
 import { type AgentActivity, type AgentTreeEvent, MSG_STATUS_KEY, TREE_STATUS_KEY } from "./event-interpret.js";
 import { createLiveChannels } from "./live-output.js";
 import { resolveModel } from "./model.js";
-import { maybeWriteFullOutput, notifyCompletion, truncateForContext } from "./notification.js";
+import { completionNotification, maybeWriteFullOutput, truncateForContext } from "./notification.js";
 import { type AgentMessage, formatFrom } from "./protocol.js";
-import { AgentRegistry, type WidgetSurface } from "./registry.js";
+import { AgentRegistry, type RegisteredAgent, type WidgetSurface } from "./registry.js";
 import { renderNotification } from "./render.js";
 import { Roster } from "./roster.js";
 import { persistRoster, rosterFromBranch } from "./roster-state.js";
@@ -290,10 +292,10 @@ export function buildSpawnParamsSchema(hasParent: boolean): ReturnType<typeof Ty
 			Type.Boolean({
 				description: hasParent
 					? "If true, keep the agent resident after it completes (idle, zero token) so follow-up " +
-						"messages skip the restart — it is cleaned up when you return. Default false."
+						"messages skip the restart. It closes when its host session exits. Default false."
 					: "Keep the agent resident after it completes (idle, zero token) so follow-up messages " +
 						"skip the restart. Default true; false exits it when done (agent_send still resumes " +
-						"it from its session).",
+						"it from its saved session). Resident agents close when their host session exits.",
 			}),
 		),
 		...(hasParent
@@ -314,7 +316,9 @@ export function buildSpawnParamsSchema(hasParent: boolean): ReturnType<typeof Ty
 const SpawnParamsSchema = buildSpawnParamsSchema(HAS_PARENT);
 
 const StopParamsSchema = Type.Object({
-	agent_id: Type.String({ description: 'The agent id to stop (e.g. "@max").' }),
+	agent_id: Type.String({
+		description: 'The agent id whose task to cancel or whose process to explicitly stop (e.g. "@max").',
+	}),
 });
 
 const SendParamsSchema = Type.Object({
@@ -410,12 +414,13 @@ async function handleMessage(
 
 /**
  * Appended to every spawn prompt: the child may not load this extension, so
- * the "ask by stopping" contract travels with the task itself. The parent
+ * the "ask by ending the reply" contract travels with the task itself. The parent
  * answers with agent_send, which resumes the child with its context.
  */
 const CHILD_PROMPT_NOTE =
-	"\n\n(If you are blocked on missing information or a decision, stop and end your reply with the question. " +
-	"The answer will resume you with this context.)";
+	"\n\n(If you are blocked on missing information or a decision, pause work and end this reply with the question. " +
+	"The answer will resume you with this context. When finished, return your deliverable directly; " +
+	"it is returned to your parent automatically, so do not send a separate completion report.)";
 
 /** The tools subagent_enable activates (registered with defaultActive: false). */
 const SUBAGENT_TOOL_NAMES = ["agent_spawn", "agent_stop", "agent_send"] as const;
@@ -467,11 +472,21 @@ export default function (pi: ExtensionAPI) {
 		return { isError: true };
 	});
 
+	const inbox = registerCompletionInbox(pi);
+	const completionSinks = new WeakMap<RegisteredAgent, (completion: AgentCompletion) => void>();
+	const bindCompletion = (agent: RegisteredAgent): void => {
+		const deliver = inbox.capture();
+		completionSinks.set(agent, (completion) => deliver(completionNotification(agent, completion)));
+	};
+	const notifyCompletion = (agent: RegisteredAgent, completion: AgentCompletion): void => {
+		completionSinks.get(agent)?.(completion);
+	};
+
 	// One registry per session: owns the running-agent bookkeeping, the
 	// completion policy (notify unless user-stopped; cleanup on every path),
 	// and the in-tree routing (direct children only — per-hop O(1)).
 	const registry = new AgentRegistry({
-		notify: (agent, completion) => notifyCompletion(pi, agent, completion),
+		notify: notifyCompletion,
 		getWidget: () => widgetSurface(),
 		hasParent: HAS_PARENT,
 	});
@@ -490,8 +505,10 @@ export default function (pi: ExtensionAPI) {
 
 	/** A wake turn ended: deliver its answer to this session, like a completion. */
 	const reportWake = async (agent: AgentProcess, status: "completed" | "failed"): Promise<void> => {
+		const completionId = agent.completionId;
 		const [output, stats] = await Promise.all([agent.lastOutput(), agent.getStats()]);
-		notifyCompletion(pi, agent, {
+		notifyCompletion(agent, {
+			completionId,
 			status,
 			output: output || (status === "failed" ? "Follow-up turn failed (model API error)." : output),
 			stats: {
@@ -543,30 +560,28 @@ export default function (pi: ExtensionAPI) {
 		label: "Agent Spawn",
 		defaultActive: false,
 		description: HAS_PARENT
-			? "Spawn an isolated sub-agent in your own context window. The call blocks until it " +
-				"finishes and returns the output. Background spawns are root-only — your lifetime " +
-				"ends when this call returns; persistent helpers are fine and live as long as you do."
-			: "Spawn an isolated sub-agent in its own context window. By default it runs in the " +
-				"background: the call returns an agent id immediately and the completion notification " +
-				"carries the result (status + agent id + final output) — you can intervene with " +
-				"agent_stop / agent_send while it runs. run_in_background: false blocks until it " +
-				"finishes and returns the output directly. After completing, an agent keeps its " +
-				"context: message it with agent_send to continue.",
-		promptSnippet: "Spawn an isolated sub-agent for heavy, parallel, or context-heavy work",
-		promptGuidelines: HAS_PARENT
-			? [
-					"Use agent_spawn when a task would flood your context with verbose intermediate output — the sub-agent keeps it in its own window and returns only its final output.",
-					"For independent parallel work, issue several foreground agent_spawn calls together — they run concurrently.",
-					"Write agent_spawn prompts self-contained: the sub-agent has zero context — include paths, constraints, and the expected output shape.",
-					"Long outputs are truncated for your context; when that happens the result carries the full-output file path — read it when you need everything.",
-				]
-			: [
-					"Use agent_spawn when a task would flood your context with verbose intermediate output — the sub-agent keeps it in its own window and returns only its final output.",
-					"Use agent_spawn for independent parallel work: spawn several agents in one block. After spawning, keep working on something else or end your turn — each result arrives as its own notification.",
-					"Write agent_spawn prompts self-contained: the sub-agent has zero context — include paths, constraints, and the expected output shape.",
-					"Never poll a background agent — its completion notification carries the result.",
-					"Long outputs are truncated for your context; when that happens the result carries the full-output file path — read it when you need everything.",
-				],
+			? "Spawn a sub-agent with its own context. Only foreground spawns are available here: " +
+				"the call waits and returns the result. Independent foreground calls can run concurrently. " +
+				"Persistent helpers cannot outlive their host session."
+			: "Spawn a sub-agent with its own context. By default it runs in the background: " +
+				"the call returns an agent id immediately and the result arrives automatically. " +
+				"run_in_background: false waits and returns the result directly. After completion, " +
+				"use agent_send with the original id to continue the saved conversation.",
+		promptSnippet: "Spawn a sub-agent for independent parallel work or context isolation",
+		promptGuidelines: [
+			"Before spawning, consider existing relevant sub-agents. For follow-up questions, revisions, additional tests, or later stages of the same task, prefer agent_send with the original id, including agents whose saved sessions can be resumed. Do not create a replacement merely because the previous turn finished.",
+			"Spawn a new agent for independent parallel work, an independent review needing fresh context, or when existing agents are unsuitable. Delegate context-heavy work to keep verbose intermediate output out of your own context.",
+			"Write self-contained task prompts: a new agent does not have your full context. Include necessary paths, constraints, and expected deliverables.",
+			...(HAS_PARENT
+				? [
+						"For independent parallel work, issue several foreground agent_spawn calls together; each returns its result directly.",
+					]
+				: [
+						"After background spawning, keep working or end your reply to await results. Ready results arrive at the next turn boundary or wake an idle parent; do not poll or repeatedly ask agents to finish.",
+					]),
+			"Completion notifications need no acknowledgement. Integrate results into your work; do not send receipt-only messages to agents or repeatedly tell the user the conclusion is unchanged.",
+			"Long outputs are truncated for your context; when that happens the result carries the full-output file path — read it when you need everything.",
+		],
 		parameters: SpawnParamsSchema,
 
 		async execute(_toolCallId, raw, signal, onUpdate, ctx) {
@@ -743,6 +758,7 @@ export default function (pi: ExtensionAPI) {
 					if (processes.get(agentId) === agent) processes.delete(agentId);
 				},
 			});
+			bindCompletion(agent);
 			processes.set(agentId, agent);
 			// The bottom list shows every agent of the conversation, foreground too.
 			ensureWidget(ctx);
@@ -942,7 +958,7 @@ export default function (pi: ExtensionAPI) {
 							{
 								type: "text",
 								text: outcome.resident
-									? `${truncateForContext(outcome.output)}${maybeWriteFullOutput(agent.agentId, outcome.output)}\n\n(agent @${agent.agentId} is resident \u2014 send it follow-ups with agent_send)`
+									? `${truncateForContext(outcome.output)}${maybeWriteFullOutput(agent.agentId, outcome.output)}\n\n(agent @${agent.agentId} has completed and is idle; use agent_send for related follow-up work. No acknowledgement is needed.)`
 									: truncateForContext(outcome.output) + maybeWriteFullOutput(agent.agentId, outcome.output),
 							},
 						],
@@ -974,13 +990,15 @@ export default function (pi: ExtensionAPI) {
 		label: "Stop Agent",
 		defaultActive: false,
 		description:
-			"Terminate a sub-agent: a running agent discards its work; a persistent (idle) " +
-			"agent exits and is removed. The completion notification is " +
-			"suppressed for deliberate stops.",
-		promptSnippet: "Stop a running or idle sub-agent",
+			"Cancel a sub-agent's running task and stop its process; for an idle agent, only the process is stopped. " +
+			"Saved conversations are not deleted and file changes are not rolled back. " +
+			"Deliberate stops produce no new completion notification; already completed results remain deliverable.",
+		promptSnippet: "Cancel a sub-agent task",
 		promptGuidelines: [
-			"Use agent_stop when a background agent is consuming tokens on a wrong path — stop it and respawn with a corrected prompt.",
-			"Stop a persistent agent when you no longer need it — an idle agent still holds a resident process until stopped.",
+			"Use agent_stop when a task is cancelled, the user explicitly requests a stop, or incorrect execution must be halted immediately.",
+			"For ordinary course corrections or additional constraints, prefer agent_send; do not default to stopping and respawning.",
+			"Do not routinely stop agents after they finish. Idle agents consume no model tokens and close automatically when their host session exits.",
+			"Stopping is not a rollback: partial files or submitted jobs may remain. Check actual state before resuming work.",
 		],
 		parameters: StopParamsSchema,
 
@@ -1045,10 +1063,16 @@ export default function (pi: ExtensionAPI) {
 		name: "agent_send",
 		label: "Send Message",
 		defaultActive: false,
-		description: "Send a message to another agent — a sub-agent or your parent.",
-		promptSnippet: "Send a message to a sub-agent or your parent",
+		description:
+			"Send a task request, necessary information, or an answer to an existing sub-agent or your parent. " +
+			"Uses steering: delivered after the target's current response and tool batch, before its next model request. " +
+			"Wakes idle children or resumes exited children with recoverable saved sessions in their original context. " +
+			"This is not a silent note.",
+		promptSnippet: "Continue an existing sub-agent's work or send necessary coordination",
 		promptGuidelines: [
-			"A sub-agent blocked on missing information or a decision ends its reply with the question. Answer it (or send any follow-up) with agent_send: the agent continues with its full context — a finished one is resumed from its session automatically — and its answer arrives as a notification.",
+			"Use agent_send for follow-up work, necessary corrections, missing information, or answers.",
+			"Do not send thanks, receipts, status-only announcements, or ask an already-finished agent to wrap up; these messages trigger extra replies.",
+			"When a sub-agent ends its reply with a question because it lacks information or a decision, answer with agent_send. It continues with its saved context and its result is returned automatically.",
 		],
 		parameters: SendParamsSchema,
 
@@ -1203,6 +1227,7 @@ export default function (pi: ExtensionAPI) {
 			},
 		});
 		agent.wakeOrigin = origin;
+		bindCompletion(agent);
 		processes.set(agentId, agent);
 		const started = await agent.spawnAndSend(text);
 		if (!started.ok) {

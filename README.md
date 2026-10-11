@@ -20,7 +20,7 @@ Pi has no built‑in sub‑agents. So heavy, parallel, or context‑heavy work c
 ## Features
 
 - **Quiet context** — logs, search hits, and test output stay in the child's window. You get the final result, not the churn.
-- **True parallel** — fire several background agents at once; each delivers its own notification when done. No queue, no result tool.
+- **True parallel** — fire several background agents at once. Ready results are delivered together at the parent's next turn boundary, with a separate card per result. No worker queue or result tool.
 - **Stay in control** — `agent_send` redirects a running agent (or wakes an idle one); `agent_stop` kills it. A child's message up the tree is delivered best-effort (no ack).
 - **Follow-ups keep context** — a finished agent stays resident by default (idle, zero tokens; ~180 MB RAM each), and `agent_send` to an agent whose process is gone resumes it from its session file. A sub-agent that needs information or a decision ends its reply with the question; the parent answers with `agent_send` and the agent continues where it stopped.
 - **Pi‑native** — rendering, sessions, and attach all reuse pi's own mechanisms; the cards look like built‑in tools because they are.
@@ -87,7 +87,7 @@ Pi issues three `agent_spawn` calls in one block — foreground calls run in par
 That data‑layer sub‑agent — the approach won't work, rewrite it with composition instead
 ```
 
-Pi calls `agent_send` to inject a redirecting message into the running agent (delivered after its current turn settles). To stop a runaway agent: "kill that background sub‑agent" → `agent_stop`. Both work on a running agent; with `persistent: true` they also work after completion — `agent_send` wakes the idle agent for follow‑ups, `agent_stop` kills it.
+Pi calls `agent_send` to steer the running agent (after its current response and tool batch, before the next model request). To stop a runaway agent: "kill that background sub‑agent" → `agent_stop`. Both work on a running agent; with `persistent: true` they also work after completion — `agent_send` wakes the idle agent for follow‑ups, `agent_stop` kills it.
 
 ## Enabling the tools
 
@@ -149,18 +149,24 @@ The directory lives **outside** pi's standard session tree so `pi -r` (resume) s
 | `timeoutMs` | number | none | Optional deadline (ms). On firing, the extension stops the child, waits for it to settle, and shuts down gracefully. |
 | `persistent` | boolean | `true` (root) / `false` (inside a sub-agent) | Keep the child resident (idle, zero tokens) after completion so follow-ups skip the restart; `agent_stop` tears it down. With `false` it exits when done — `agent_send` still resumes it from its session. |
 
-#### `agent_stop` — terminate an agent
+For questions, revisions, additional tests, and later stages of the same task, prefer `agent_send` to the original relevant agent—even if it needs to resume from its saved session. Spawn a new agent for independent parallel work, a fresh-context independent review, or when existing agents are unsuitable, not merely because a turn finished.
+
+#### `agent_stop` — cancel an agent task
 
 | Param | Meaning |
 |---|---|
-| `agent_id` | **required** — the id `agent_spawn` returned. Stops a running agent, or an idle `persistent` one. Graceful shutdown (stdin EOF); no completion notification. |
+| `agent_id` | **required** — the id `agent_spawn` returned. Cancels a running task and stops its process, or stops an idle process when explicitly requested. Graceful shutdown (stdin EOF); no new completion notification. |
+
+Use `agent_stop` for cancellation, an explicit stop request, or incorrect execution that must halt immediately. Ordinary corrections use `agent_send`; do not routinely stop and recreate agents after completion. Idle agents consume no model tokens and close with their host session. Stopping neither deletes saved conversations nor rolls back files or submitted jobs; inspect actual state before resuming.
 
 #### `agent_send` — message an agent in the tree
 
 | Param | Meaning |
 |---|---|
 | `to` | **required** — the agent id agent_spawn gave you (a short human name like `max`), or `"@parent"` to message the session that spawned you. |
-| `message` | **required** — the message text; delivered after the target's current turn settles, wakes an idle agent, or resumes a finished one from its session file (its answer arrives as a notification). |
+| `message` | **required** — the message text; steered after the target's current response/tool batch, wakes an idle agent, or resumes a finished one from its session file (its answer arrives as a notification). |
+
+`agent_send` starts more work, not a silent note. Use it for follow-up work, necessary corrections, missing information, or answers—not thanks, receipts, status-only announcements, or telling an already-finished agent to finish. Completion notifications need no acknowledgement; integrate them into the work instead of issuing repeated status-only replies.
 
 Messages travel the parent↔child edges of the agent tree: a direct child is delivered straight down, `@parent` goes up, and cross‑level/sibling messages are forwarded through the parent LLM's context along the way.
 
@@ -191,11 +197,11 @@ Sub‑agent won't see any other tools. Read‑only exploration with a cheaper mo
 Every sub‑agent is a resident `pi --mode rpc` child with a persisted session:
 
 - **Foreground** — `agent_spawn` waits for the child to settle, fetches the final output, then closes stdin (graceful shutdown).
-- **Background** — `agent_spawn` returns immediately; on `agent_settled` the extension delivers a `subagent-notification` (JSON content to the LLM, rendered card to the user) and the child shuts down gracefully.
-- **Send/stop** — `agent_send` delivers a message to the child's stdin (queued while it runs, delivered after its current turn settles); `agent_stop` closes stdin for a graceful shutdown. Both work on a running agent.
+- **Background results** — `agent_spawn` returns immediately. Each child settlement queues a `subagent-notification`. While the parent is busy, all ready results enter at `turn_end`, with `agent_before_settle` as a fallback; they do not wait in the follow-up queue. Idle delivery collects the ready batch for one event-loop tick, appends separate cards, and starts only one model run. It never waits for unfinished children.
+- **Send/stop** — `agent_send` uses steering in both directions (after the current response/tool batch, before the next request); idle children wake. `agent_stop` closes stdin for a graceful shutdown, without a new completion notification; already queued results remain deliverable.
 - **Resident idle** — by default the child stays resident after completion (idle, zero tokens). A later `agent_send` wakes it to continue the same context; `agent_stop` tears it down. The completion notification and list row carry the `idle` marker.
 - **Resume** — `agent_send` to a direct child whose process is gone starts `pi --mode rpc --session <path>` with the message as its next turn; the answer comes back as a notification.
-- **Questions** — every spawn prompt ends with a short note telling the child to stop and end its reply with the question when it is blocked; the parent answers with `agent_send`.
+- **Questions and deliverables** — every spawn prompt tells the child to pause work and end its reply with a question when blocked; the parent answers with `agent_send`. Completed deliverables return automatically, so the child should not send a separate completion report.
 - **Attach / review** — sub‑agent sessions live in `<agent dir>/subagent-sessions/` (see [Configuration](#configuration)). Find the session path in the main conversation and run `pi --session <path>` — or ask the LLM, the notification carries the path too.
 - **Graceful turn limits (opt‑in)** — no hidden deadline: a sub‑agent runs until it finishes or is stopped unless you pass `timeoutMs`. No abrupt SIGTERM. No token limits — usage is only reported on the notification card.
 
@@ -211,7 +217,7 @@ The mechanism is a pure point-to-point deliverer: `agent_send` delivers to a dir
 
 - **Headless children die with the host** (`pi -p`). The main process exits at the end of its reply; background children are then torn down via stdin EOF — never orphaned. Background flows (waiting for the notification, messaging, stopping) are for the always‑alive TUI session.
 - **One process per child.** Foreground and background are the same resident rpc child. Many children = many processes — spawn with care.
-- **One‑shot results.** A background result is delivered once; if the main session dies before delivery, the result survives in the session file (`pi --session <path>`).
+- **One-shot results.** A process-settlement `completion_id` deduplicates each event within the live session. Different turns of the same child are preserved, even with identical text. After a parent abort/error, results are saved without requesting a restart; they remain available for the next accepted run. If the main session dies before delivery, the result survives in the child's session file (`pi --session <path>`).
 - **Resident agents cost memory.** Each idle agent is a pi process (~180 MB RSS with a typical extension set) until the session ends or `agent_stop`. Pass `persistent: false` for one-off work; follow-ups still work through resume.
 
 ## Cleanup

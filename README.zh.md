@@ -20,7 +20,7 @@ Pi 没有内置 sub-agent。于是重活、并行的活、吃上下文的活，�
 ## 特性
 
 - **安静上下文** — 日志、搜索结果、测试输出留在子窗口里。你拿到最终结果，不是一片杂乱。
-- **真正并行** — 一次起多个后台 agent，各自完成时投递自己的通知。无队列、无取结果工具。
+- **真正并行** — 一次起多个后台 agent，就绪结果在主代理下一个 turn 边界一起交付，每份保留独立卡片。无任务排队、无取结果工具。
 - **全程可控** — `agent_send` 给运行中的 agent 发消息重定向（也能唤醒空闲的），`agent_stop` 终止。子 agent 发往父会话的消息是尽力投递（无确认）。
 - **追问保留上下文** —— 子代理完成后默认常驻（空闲，零 token；每个约 180 MB 内存），`agent_send` 发给进程已退出的子代理时会从会话文件自动复活它。子代理缺信息或需要决策时，把问题作为最后的回答结束；父代理用 `agent_send` 回答，子代理接着原来的上下文继续。
 - **Pi 原生** — 渲染、会话、attach 全复用 pi 自己的机制；卡片看起来像内置工具——因为它们就是。
@@ -87,7 +87,7 @@ Pi 在同一块里发三次 `agent_spawn`——前台调用并行执行，每次
 那个数据层子 agent——方案行不通，改用组合式重写
 ```
 
-Pi 调用 `agent_send` 向运行中的 agent 注入重定向消息（当前 turn 结束后送达）。要停掉失控的 agent：“干掉那个后台子 agent” → `agent_stop`。两者对运行中的 agent 都适用；`persistent: true` 的话，完成后依然可寻址——`agent_send` 唤醒空闲的 agent 继续追问，`agent_stop` 结束。
+Pi 调用 `agent_send` 向运行中的 agent 注入 steering（当前模型响应及工具批次结束后、下一次模型调用前送达）。要停掉失控的 agent：“干掉那个后台子 agent” → `agent_stop`。两者对运行中的 agent 都适用；`persistent: true` 的话，完成后依然可寻址——`agent_send` 唤醒空闲的 agent 继续追问，`agent_stop` 结束。
 
 ## 启用方式
 
@@ -149,11 +149,15 @@ Pi 调用 `agent_send` 向运行中的 agent 注入重定向消息（当前 turn
 | `timeoutMs` | number | 无 | 可选截止时间（毫秒）。触发时扩展停止子进程、等其 settled 后优雅退出。 |
 | `persistent` | boolean | `true`（根会话）/ `false`（子代理内） | 完成后常驻（空闲，零 token），追问时不用重启；`agent_stop` 结束它。`false` 时完成即退出，`agent_send` 仍会从会话文件复活它。 |
 
-#### `agent_stop` — 终止一个 agent
+同一任务的追问、修订、补测和后续阶段，优先通过原 ID 的 `agent_send` 复用相关代理，包括需要从保存会话恢复的代理。只有独立并行任务、需要干净上下文的独立复核，或已有代理不适合时才新建；不因上一轮完成就创建替代代理。
+
+#### `agent_stop` — 取消代理任务
 
 | 参数 | 含义 |
 |---|---|
-| `agent_id` | **必填** — `agent_spawn` 返回的 agent id。运行中或 idle（persistent）的 agent 都适用。优雅终止（stdin EOF → 优雅退出）；不投递完成通知。 |
+| `agent_id` | **必填** — `agent_spawn` 返回的 agent id。取消正在执行的任务并停止进程；明确要求停止空闲代理时只关闭进程。优雅终止（stdin EOF）；不生成新的完成通知。 |
+
+用于任务取消、用户明确要求停止，或必须立即中止的错误执行。普通纠正用 `agent_send`，不在完成后例行停止或重建代理。空闲代理不消耗模型 token，随父会话退出而关闭。停止不会删除保存的对话，也不会撤销文件修改或已提交作业；恢复前须核对实际状态。
 
 #### `agent_send` — 树内发消息
 
@@ -161,6 +165,8 @@ Pi 调用 `agent_send` 向运行中的 agent 注入重定向消息（当前 turn
 |---|---|
 | `to` | **必填** — agent_spawn 给到的 agent id（短人名，如 `max`），或 `"@parent"` 发给 spawn 你的会话。 |
 | `message` | **必填** —— 消息文本；在目标当前轮结束后送达，唤醒空闲子代理，或从会话文件复活已结束的子代理（回答以通知送回）。 |
+
+`agent_send` 会启动后续工作，不是静默留言。只用于后续任务、必要纠正、补充缺失信息或回答问题；不要用它道谢、发收条、纯状态通报或要求已经完成的代理收尾。完成通知无需确认，应直接整合到工作，不逐条向用户回复“结论不变”。
 
 消息沿树的父子边路由：直接子 agent 下投，`@parent` 上抛，跨层/兄弟消息经途经的父 LLM 上下文中转（见[嵌套 sub-agent](#嵌套-sub-agent)）。
 
@@ -191,9 +197,10 @@ LLM 通过 `promptSnippet` + `promptGuidelines`（系统提示注入）获得使
 每个 sub-agent 都是带持久化 session 的常驻 `pi --mode rpc` 子进程：
 
 - **前台** — `agent_spawn` 等待子进程 settled，取最终输出，然后关闭 stdin（优雅退出）。
-- **后台** — `agent_spawn` 立即返回；`agent_settled` 时扩展投递 `subagent-notification`（JSON 内容给 LLM、渲染卡片给用户），子进程优雅退出。
-- **发消息/停止** — `agent_send` 向子进程 stdin 投递消息（运行中入队，当前 turn settled 后送达）；`agent_stop` 关闭 stdin 优雅退出。两者对运行中的 agent 都适用。
+- **后台结果** — `agent_spawn` 立即返回；子代理 settled 后，结果进入会话级收件箱。主代理忙碌时，在 `turn_end` 一次交付所有就绪结果，`agent_before_settle` 兜底，不排进逐条 follow-up 队列。空闲时只合并一个事件循环 tick 内已就绪的结果，保留独立卡片、只启动一次模型处理，不等待尚未完成的子代理。
+- **发消息/停止** — `agent_send` 双向均用 steering（当前响应及工具批次结束后、下一次模型调用前），空闲子代理会被唤醒；`agent_stop` 关闭 stdin 优雅退出，不新增完成通知，但不删除已排队的有效结果。
 - **Persistent idle** — `persistent: true` 时子进程完成后驻留 idle（零 token）；之后 `agent_send` 可唤醒继续同一上下文，`agent_stop` 结束。完成通知与 widget 行带 `idle` 标记。
+- **提问与交付** — 每个子任务末尾说明：缺信息时暂停工作，以问题结束本轮回复，等待父代理回答；完成后直接返回交付，结果自动回传，不额外发送一份完成报告。
 - **Attach / 复盘** — sub-agent 会话存储在 `<agent 目录>/subagent-sessions/`（见[配置](#配置)）。在主会话里找到 session 路径（agent_spawn 调用结果或完成通知卡片），执行 `pi --session <path>`——通知里也带 path，直接问 LLM 也行。
 - **Graceful turn limits（默认不限，opt-in）** — 不设隐藏 deadline：子 agent 一直跑到完成或被停，除非你传 `timeoutMs`。不做 token 限制——用量仅通知卡统计。
 
@@ -209,8 +216,8 @@ LLM 通过 `promptSnippet` + `promptGuidelines`（系统提示注入）获得使
 
 - **Headless 下子 agent 随宿主退出**（`pi -p`）。主进程在响应结束时退出，后台子 agent 经 stdin EOF 被清理——从不留孤儿。后台流程（等通知、发消息、stop）面向常驻的 TUI 会话。
 - **一子 agent 一进程。** 前台后台同是常驻 rpc 子进程。开多了 = 进程多了——请节制。
-- **结果一次性投递。** 后台结果只投一次；若主会话先崩，结果还在 session 文件里（`pi --session <path>`）。
-- **发消息/停止需要可寻址的子 agent。** `agent_send` 与 `agent_stop` 指向运行中的子 agent——`persistent` spawn 的话，完成后驻留的 idle 子 agent 同样可寻址。非 persistent 的子 agent 在完成通知投递后就没了，对它发消息/停止会报错。
+- **结果一次性投递。** 按进程及 settlement 的 `completion_id` 在当前运行会话内去重。同一代理不同轮次均保留，即使文本相同。主代理中断或报错后，结果只保存、不强行重启模型，供下一轮使用；若主会话先崩，结果仍在子代理 session 文件里（`pi --session <path>`）。
+- **恢复依赖保存的会话。** `agent_send` 可从会话文件恢复已退出的直接子代理；`agent_stop` 只针对仍存活的进程。恢复的是对话上下文，不是被中断工具的内存或执行位置。
 
 ## 清理
 

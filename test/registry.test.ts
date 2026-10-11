@@ -68,6 +68,7 @@ class FakeWidget implements WidgetSurface {
 
 function completion(overrides: Partial<AgentCompletion> = {}): AgentCompletion {
 	return {
+		completionId: "test:1",
 		status: "completed",
 		output: "done",
 		stats: { tokens: 10, toolUses: 1, durationMs: 100 },

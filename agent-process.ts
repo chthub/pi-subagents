@@ -16,6 +16,7 @@
  *   the child runs until it finishes or is stopped via agent_stop.
  */
 
+import { randomUUID } from "node:crypto";
 import type { AgentTreeEvent } from "./event-interpret.js";
 import { type AgentActivity, interpretEvent } from "./event-interpret.js";
 import type { AgentMessage, RpcCommand, RpcEvent } from "./protocol.js";
@@ -33,6 +34,8 @@ interface AgentStats {
 }
 
 export interface AgentCompletion {
+	/** Stable identity of one process settlement, not its output text. */
+	completionId: string;
 	status: TerminalStatus;
 	output: string;
 	stats: AgentStats;
@@ -114,6 +117,12 @@ export class AgentProcess {
 	/** Total agent_settled events seen; lets awaitSettled skip settles that
 	 *  arrived while no waiter was attached (synchronous test emit pattern). */
 	private settleCount = 0;
+	private readonly processId = randomUUID();
+
+	/** Capture before asynchronous output/stat reads; a later wake has another id. */
+	get completionId(): string {
+		return `${this.processId}:${this.settleCount}`;
+	}
 	/** settleCount observed at the last awaitSettled() call. */
 	private lastSettledCount = 0;
 	private done = false;
@@ -322,6 +331,7 @@ export class AgentProcess {
 		// A failed child usually leaves empty terminal text; the real root cause
 		// lives in the model error (agentError) or the stderr the RpcClient
 		// captured before exit — surface it instead of a blank "Sub-agent failed."
+		const completionId = this.completionId;
 		const output = await this.lastOutput();
 		const finalOutput =
 			this.agentError && !output.trim()
@@ -331,6 +341,7 @@ export class AgentProcess {
 					: output;
 		const stats = await this.getStats();
 		return {
+			completionId,
 			status: this.status,
 			output: finalOutput,
 			stats: {
