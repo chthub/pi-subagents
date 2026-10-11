@@ -97,7 +97,7 @@ Pi 调用 `agent_send` 向运行中的 agent 注入 steering（当前模型响�
 
 包内自带 [`pi-subagents-workflow`](skills/pi-subagents-workflow/SKILL.md)，是任务边界、并行、文件修改分工、后续工作和检查规则的唯一维护位置。不定义预设代理身份，也不在运行时强制工作流。
 
-加载整个包后，新窗口默认就能看到 skill 的名称、触发描述和路径，不需要先调用 `subagent_enable`。模型读取 skill 或用户调用 `/skill:pi-subagents-workflow` 时，全文才进入上下文。包的 skill 过滤配置和 `--no-skills` 可以禁用发现。只用 `-e` 加载 `index.ts` 不会同时加载包内 skill。
+加载整个包后，新窗口默认就能看到 skill 的名称、触发描述和路径，不需要先调用 `subagent_enable`。模型读取 skill 或用户调用 `/skill:pi-subagents-workflow` 时，全文才进入上下文。包的 skill 过滤配置和 `--no-skills` 可以禁用发现。只用 `-e` 加载 `index.ts` 不会同时加载包内 skill。不能再派生子代理的子代理（默认深度下所有子代理都是如此）看不到这个 skill。
 
 工具描述解释调用会发生什么，skill 说明主代理怎么组织工作。子代理即使没有读取 skill，也会收到一段解释最终回复自动回传的简短任务附言。
 

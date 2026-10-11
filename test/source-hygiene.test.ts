@@ -1,27 +1,34 @@
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
-import { dirname, extname, join, relative } from "node:path";
+import { execFileSync } from "node:child_process";
+import { existsSync, lstatSync, readFileSync } from "node:fs";
+import { basename, dirname, extname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
-const ignored = new Set([".git", "node_modules", ".scratch"]);
 const textExtensions = new Set([".ts", ".js", ".mjs", ".json", ".md"]);
 
-function sourceFiles(dir = root): string[] {
-	return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
-		if (ignored.has(entry.name) || entry.isSymbolicLink()) return [];
-		const path = join(dir, entry.name);
-		if (entry.isDirectory()) return sourceFiles(path);
-		return textExtensions.has(extname(path)) || entry.name === "LICENSE" || entry.name === ".gitignore" ? [path] : [];
-	});
+/** Tracked and new (not ignored) files; local ignored files never ship. */
+function sourceFiles(): string[] {
+	return execFileSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], {
+		cwd: root,
+		encoding: "utf8",
+	})
+		.split("\0")
+		.filter((name) => {
+			if (!name) return false;
+			const path = join(root, name);
+			// A tracked file deleted in the working tree is still listed.
+			if (!existsSync(path) || lstatSync(path).isSymbolicLink()) return false;
+			const file = basename(name);
+			return textExtensions.has(extname(name)) || file === "LICENSE" || file === ".gitignore";
+		});
 }
 
 function locations(patterns: RegExp[], exempt?: string): string[] {
-	return sourceFiles().flatMap((path) => {
-		const name = relative(root, path);
+	return sourceFiles().flatMap((name) => {
 		if (name === exempt) return [];
-		return readFileSync(path, "utf8")
+		return readFileSync(join(root, name), "utf8")
 			.split("\n")
 			.flatMap((line, index) => (patterns.some((pattern) => pattern.test(line)) ? [`${name}:${index + 1}`] : []));
 	});

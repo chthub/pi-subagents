@@ -1,6 +1,6 @@
 ---
 name: pi-subagents-workflow
-description: Coordinate delegated work with agent_spawn, agent_send, and agent_stop. Use when the main agent plans parallel tasks, assigns file changes, continues a sub-agent's work, or integrates independent checks.
+description: Coordinate delegated work with agent_spawn, agent_send, and agent_stop. Use when the user asks for sub-agents, a task would flood your context with verbose output, or it splits into independent parallel parts; also when continuing, messaging, or stopping existing sub-agents.
 ---
 
 # Sub-agent coordination

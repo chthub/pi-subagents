@@ -106,14 +106,16 @@ async function setup(t: TestContext, extra?: (pi: ExtensionAPI, deliver: (id: st
 			timestamp: Date.now(),
 			...response,
 		};
+		// Checked before the gate: a throw inside gate.then would be an
+		// unhandled rejection instead of failing this call.
+		const { stopReason } = message;
+		if (stopReason === "pending") throw new Error("The scripted provider must finish its response");
 		stream.push({ type: "start", partial: message });
 		const finish = () => {
-			if (message.stopReason === "aborted" || message.stopReason === "error") {
-				stream.push({ type: "error", reason: message.stopReason, error: message });
-			} else if (message.stopReason === "pending") {
-				throw new Error("The scripted provider must finish its response");
+			if (stopReason === "aborted" || stopReason === "error") {
+				stream.push({ type: "error", reason: stopReason, error: message });
 			} else {
-				stream.push({ type: "done", reason: message.stopReason, message });
+				stream.push({ type: "done", reason: stopReason, message });
 			}
 			stream.end();
 		};

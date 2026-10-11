@@ -57,9 +57,19 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // ─── Story data ─────────────────────────────────────────────
 
+// Labels and messages shared by the cards and widget rows that show them.
+const CI_LABEL = "Check CI configuration";
+const QUERIES_LABEL = "Investigate slow queries";
+const QUERIES_PROMPT = "Find slow queries on the orders table.";
+const QUERIES_STEER =
+	"Focus on indexes and slow queries in the orders table\nSecond line: focus on the result.\nThird: wrap up when done.";
+const REPORTS_LABEL = "Audit the reports table";
+const REPORTS_PROMPT = "Audit the reports table for stale aggregates.";
+const CI_FOLLOW_UP = "Continue: write a fix PR description for each of the five issues";
+
 const params: AgentParams = {
 	prompt: "Check the CI config for flaky tests. Look at the pipeline definition and report issues with evidence.",
-	label: "Check CI configuration",
+	label: CI_LABEL,
 	model: "claude-sonnet",
 	thinking: "high",
 };
@@ -385,7 +395,7 @@ const pathA: LifecyclePath = {
 			name: "a1 started",
 			ticks: 19,
 			stream: [{ kind: "agent", args: bgArgs, details: details({ runInBackground: true }), isPartial: false }],
-			widget: [{ id: "max", label: "Check CI configuration", startedOffset: 27_500, activity: activityTool }],
+			widget: [{ id: "max", label: CI_LABEL, startedOffset: 27_500, activity: activityTool }],
 			status: "working",
 		},
 		{
@@ -395,12 +405,12 @@ const pathA: LifecyclePath = {
 				{ kind: "agent", args: bgArgs, details: details({ runInBackground: true }), isPartial: false },
 				{
 					kind: "agent",
-					args: { ...bgArgs, label: "Investigate slow queries", prompt: "Find slow queries on the orders table." },
-					details: details({ runInBackground: true, label: "Investigate slow queries" }),
+					args: { ...bgArgs, label: QUERIES_LABEL, prompt: QUERIES_PROMPT },
+					details: details({ runInBackground: true, label: QUERIES_LABEL }),
 					isPartial: true,
 				},
 			],
-			widget: [{ id: "max", label: "Check CI configuration", startedOffset: 27_500, activity: activityTool }],
+			widget: [{ id: "max", label: CI_LABEL, startedOffset: 27_500, activity: activityTool }],
 			status: "spawn",
 		},
 		{
@@ -410,14 +420,14 @@ const pathA: LifecyclePath = {
 				{ kind: "agent", args: bgArgs, details: details({ runInBackground: true }), isPartial: false },
 				{
 					kind: "agent",
-					args: { ...bgArgs, label: "Investigate slow queries", prompt: "Find slow queries on the orders table." },
-					details: details({ runInBackground: true, label: "Investigate slow queries" }),
+					args: { ...bgArgs, label: QUERIES_LABEL, prompt: QUERIES_PROMPT },
+					details: details({ runInBackground: true, label: QUERIES_LABEL }),
 					isPartial: false,
 				},
 			],
 			widget: [
-				{ id: "max", label: "Check CI configuration", startedOffset: 27_500, activity: activityTool },
-				{ id: "zoe", label: "Investigate slow queries", startedOffset: 12_000, activity: activityThinking },
+				{ id: "max", label: CI_LABEL, startedOffset: 27_500, activity: activityTool },
+				{ id: "zoe", label: QUERIES_LABEL, startedOffset: 12_000, activity: activityThinking },
 			],
 			status: "working",
 		},
@@ -428,24 +438,24 @@ const pathA: LifecyclePath = {
 				{ kind: "agent", args: bgArgs, details: details({ runInBackground: true }), isPartial: false },
 				{
 					kind: "agent",
-					args: { ...bgArgs, label: "Investigate slow queries", prompt: "Find slow queries on the orders table." },
-					details: details({ runInBackground: true, label: "Investigate slow queries" }),
+					args: { ...bgArgs, label: QUERIES_LABEL, prompt: QUERIES_PROMPT },
+					details: details({ runInBackground: true, label: QUERIES_LABEL }),
 					isPartial: false,
 				},
 				{
 					kind: "agent",
 					args: {
 						...bgArgs,
-						label: "Audit the reports table",
-						prompt: "Audit the reports table for stale aggregates.",
+						label: REPORTS_LABEL,
+						prompt: REPORTS_PROMPT,
 					},
-					details: details({ runInBackground: true, label: "Audit the reports table" }),
+					details: details({ runInBackground: true, label: REPORTS_LABEL }),
 					isPartial: true,
 				},
 			],
 			widget: [
-				{ id: "max", label: "Check CI configuration", startedOffset: 27_500, activity: activityTool },
-				{ id: "zoe", label: "Investigate slow queries", startedOffset: 12_000, activity: activityThinking },
+				{ id: "max", label: CI_LABEL, startedOffset: 27_500, activity: activityTool },
+				{ id: "zoe", label: QUERIES_LABEL, startedOffset: 12_000, activity: activityThinking },
 			],
 			status: "spawn",
 		},
@@ -456,25 +466,25 @@ const pathA: LifecyclePath = {
 				{ kind: "agent", args: bgArgs, details: details({ runInBackground: true }), isPartial: false },
 				{
 					kind: "agent",
-					args: { ...bgArgs, label: "Investigate slow queries", prompt: "Find slow queries on the orders table." },
-					details: details({ runInBackground: true, label: "Investigate slow queries" }),
+					args: { ...bgArgs, label: QUERIES_LABEL, prompt: QUERIES_PROMPT },
+					details: details({ runInBackground: true, label: QUERIES_LABEL }),
 					isPartial: false,
 				},
 				{
 					kind: "agent",
 					args: {
 						...bgArgs,
-						label: "Audit the reports table",
-						prompt: "Audit the reports table for stale aggregates.",
+						label: REPORTS_LABEL,
+						prompt: REPORTS_PROMPT,
 					},
-					details: details({ runInBackground: true, label: "Audit the reports table" }),
+					details: details({ runInBackground: true, label: REPORTS_LABEL }),
 					isPartial: false,
 				},
 			],
 			widget: [
-				{ id: "max", label: "Check CI configuration", startedOffset: 27_500, activity: activityTool },
-				{ id: "zoe", label: "Investigate slow queries", startedOffset: 12_000, activity: activityThinking },
-				{ id: "kai", label: "Audit the reports table", startedOffset: 3_000, activity: activityTool },
+				{ id: "max", label: CI_LABEL, startedOffset: 27_500, activity: activityTool },
+				{ id: "zoe", label: QUERIES_LABEL, startedOffset: 12_000, activity: activityThinking },
+				{ id: "kai", label: REPORTS_LABEL, startedOffset: 3_000, activity: activityTool },
 			],
 			status: "working",
 		},
@@ -485,25 +495,25 @@ const pathA: LifecyclePath = {
 				{ kind: "agent", args: bgArgs, details: details({ runInBackground: true }), isPartial: false },
 				{
 					kind: "agent",
-					args: { ...bgArgs, label: "Investigate slow queries", prompt: "Find slow queries on the orders table." },
-					details: details({ runInBackground: true, label: "Investigate slow queries" }),
+					args: { ...bgArgs, label: QUERIES_LABEL, prompt: QUERIES_PROMPT },
+					details: details({ runInBackground: true, label: QUERIES_LABEL }),
 					isPartial: false,
 				},
 				{
 					kind: "agent",
 					args: {
 						...bgArgs,
-						label: "Audit the reports table",
-						prompt: "Audit the reports table for stale aggregates.",
+						label: REPORTS_LABEL,
+						prompt: REPORTS_PROMPT,
 					},
-					details: details({ runInBackground: true, label: "Audit the reports table" }),
+					details: details({ runInBackground: true, label: REPORTS_LABEL }),
 					isPartial: false,
 				},
 			],
 			widget: [
-				{ id: "max", label: "Check CI configuration", startedOffset: 27_500, activity: activityTool },
-				{ id: "zoe", label: "Investigate slow queries", startedOffset: 12_000, activity: activityThinking },
-				{ id: "kai", label: "Audit the reports table", startedOffset: 3_000, activity: activityTool },
+				{ id: "max", label: CI_LABEL, startedOffset: 27_500, activity: activityTool },
+				{ id: "zoe", label: QUERIES_LABEL, startedOffset: 12_000, activity: activityThinking },
+				{ id: "kai", label: REPORTS_LABEL, startedOffset: 3_000, activity: activityTool },
 			],
 			status: "working",
 		},
@@ -514,31 +524,31 @@ const pathA: LifecyclePath = {
 				{ kind: "agent", args: bgArgs, details: details({ runInBackground: true }), isPartial: false },
 				{
 					kind: "agent",
-					args: { ...bgArgs, label: "Investigate slow queries", prompt: "Find slow queries on the orders table." },
-					details: details({ runInBackground: true, label: "Investigate slow queries" }),
+					args: { ...bgArgs, label: QUERIES_LABEL, prompt: QUERIES_PROMPT },
+					details: details({ runInBackground: true, label: QUERIES_LABEL }),
 					isPartial: false,
 				},
 				{
 					kind: "agent",
 					args: {
 						...bgArgs,
-						label: "Audit the reports table",
-						prompt: "Audit the reports table for stale aggregates.",
+						label: REPORTS_LABEL,
+						prompt: REPORTS_PROMPT,
 					},
-					details: details({ runInBackground: true, label: "Audit the reports table" }),
+					details: details({ runInBackground: true, label: REPORTS_LABEL }),
 					isPartial: false,
 				},
 				{
 					kind: "control",
 					args: { to: "zoe", message: "Focus on indexes in the orders table" },
-					details: { to: "zoe", label: "Investigate slow queries" },
+					details: { to: "zoe", label: QUERIES_LABEL },
 					isPartial: true,
 				},
 			],
 			widget: [
-				{ id: "max", label: "Check CI configuration", startedOffset: 27_500, activity: activityTool },
-				{ id: "zoe", label: "Investigate slow queries", startedOffset: 12_000, activity: activityThinking },
-				{ id: "kai", label: "Audit the reports table", startedOffset: 3_000, activity: activityTool },
+				{ id: "max", label: CI_LABEL, startedOffset: 27_500, activity: activityTool },
+				{ id: "zoe", label: QUERIES_LABEL, startedOffset: 12_000, activity: activityThinking },
+				{ id: "kai", label: REPORTS_LABEL, startedOffset: 3_000, activity: activityTool },
 			],
 			status: "send",
 		},
@@ -549,35 +559,34 @@ const pathA: LifecyclePath = {
 				{ kind: "agent", args: bgArgs, details: details({ runInBackground: true }), isPartial: false },
 				{
 					kind: "agent",
-					args: { ...bgArgs, label: "Investigate slow queries", prompt: "Find slow queries on the orders table." },
-					details: details({ runInBackground: true, label: "Investigate slow queries" }),
+					args: { ...bgArgs, label: QUERIES_LABEL, prompt: QUERIES_PROMPT },
+					details: details({ runInBackground: true, label: QUERIES_LABEL }),
 					isPartial: false,
 				},
 				{
 					kind: "agent",
 					args: {
 						...bgArgs,
-						label: "Audit the reports table",
-						prompt: "Audit the reports table for stale aggregates.",
+						label: REPORTS_LABEL,
+						prompt: REPORTS_PROMPT,
 					},
-					details: details({ runInBackground: true, label: "Audit the reports table" }),
+					details: details({ runInBackground: true, label: REPORTS_LABEL }),
 					isPartial: false,
 				},
 				{
 					kind: "control",
 					args: { to: "zoe", message: "Focus on indexes in the orders table" },
 					details: {
-						label: "Investigate slow queries",
-						message:
-							"Focus on indexes and slow queries in the orders table\nSecond line: focus on the result.\nThird: wrap up when done.",
+						label: QUERIES_LABEL,
+						message: QUERIES_STEER,
 					},
 					isPartial: false,
 				},
 			],
 			widget: [
-				{ id: "max", label: "Check CI configuration", startedOffset: 27_500, activity: activityTool },
-				{ id: "zoe", label: "Investigate slow queries", startedOffset: 12_000, activity: activityThinking },
-				{ id: "kai", label: "Audit the reports table", startedOffset: 3_000, activity: activityTool },
+				{ id: "max", label: CI_LABEL, startedOffset: 27_500, activity: activityTool },
+				{ id: "zoe", label: QUERIES_LABEL, startedOffset: 12_000, activity: activityThinking },
+				{ id: "kai", label: REPORTS_LABEL, startedOffset: 3_000, activity: activityTool },
 			],
 			status: "send",
 		},
@@ -588,41 +597,40 @@ const pathA: LifecyclePath = {
 				{ kind: "agent", args: bgArgs, details: details({ runInBackground: true }), isPartial: false },
 				{
 					kind: "agent",
-					args: { ...bgArgs, label: "Investigate slow queries", prompt: "Find slow queries on the orders table." },
-					details: details({ runInBackground: true, label: "Investigate slow queries" }),
+					args: { ...bgArgs, label: QUERIES_LABEL, prompt: QUERIES_PROMPT },
+					details: details({ runInBackground: true, label: QUERIES_LABEL }),
 					isPartial: false,
 				},
 				{
 					kind: "agent",
 					args: {
 						...bgArgs,
-						label: "Audit the reports table",
-						prompt: "Audit the reports table for stale aggregates.",
+						label: REPORTS_LABEL,
+						prompt: REPORTS_PROMPT,
 					},
-					details: details({ runInBackground: true, label: "Audit the reports table" }),
+					details: details({ runInBackground: true, label: REPORTS_LABEL }),
 					isPartial: false,
 				},
 				{
 					kind: "control",
 					args: { to: "zoe", message: "Focus on indexes in the orders table" },
 					details: {
-						label: "Investigate slow queries",
-						message:
-							"Focus on indexes and slow queries in the orders table\nSecond line: focus on the result.\nThird: wrap up when done.",
+						label: QUERIES_LABEL,
+						message: QUERIES_STEER,
 					},
 					isPartial: false,
 				},
 				{
 					kind: "control",
 					args: { agent_id: "kai" },
-					details: { label: "Audit the reports table" },
+					details: { label: REPORTS_LABEL },
 					isPartial: true,
 				},
 			],
 			widget: [
-				{ id: "max", label: "Check CI configuration", startedOffset: 27_500, activity: activityTool },
-				{ id: "zoe", label: "Investigate slow queries", startedOffset: 12_000, activity: activityThinking },
-				{ id: "kai", label: "Audit the reports table", startedOffset: 3_000, activity: activityTool },
+				{ id: "max", label: CI_LABEL, startedOffset: 27_500, activity: activityTool },
+				{ id: "zoe", label: QUERIES_LABEL, startedOffset: 12_000, activity: activityThinking },
+				{ id: "kai", label: REPORTS_LABEL, startedOffset: 3_000, activity: activityTool },
 			],
 			status: "stop",
 		},
@@ -633,40 +641,39 @@ const pathA: LifecyclePath = {
 				{ kind: "agent", args: bgArgs, details: details({ runInBackground: true }), isPartial: false },
 				{
 					kind: "agent",
-					args: { ...bgArgs, label: "Investigate slow queries", prompt: "Find slow queries on the orders table." },
-					details: details({ runInBackground: true, label: "Investigate slow queries" }),
+					args: { ...bgArgs, label: QUERIES_LABEL, prompt: QUERIES_PROMPT },
+					details: details({ runInBackground: true, label: QUERIES_LABEL }),
 					isPartial: false,
 				},
 				{
 					kind: "agent",
 					args: {
 						...bgArgs,
-						label: "Audit the reports table",
-						prompt: "Audit the reports table for stale aggregates.",
+						label: REPORTS_LABEL,
+						prompt: REPORTS_PROMPT,
 					},
-					details: details({ runInBackground: true, label: "Audit the reports table" }),
+					details: details({ runInBackground: true, label: REPORTS_LABEL }),
 					isPartial: false,
 				},
 				{
 					kind: "control",
 					args: { to: "zoe", message: "Focus on indexes in the orders table" },
 					details: {
-						label: "Investigate slow queries",
-						message:
-							"Focus on indexes and slow queries in the orders table\nSecond line: focus on the result.\nThird: wrap up when done.",
+						label: QUERIES_LABEL,
+						message: QUERIES_STEER,
 					},
 					isPartial: false,
 				},
 				{
 					kind: "control",
 					args: { agent_id: "kai" },
-					details: { label: "Audit the reports table" },
+					details: { label: REPORTS_LABEL },
 					isPartial: false,
 				},
 			],
 			widget: [
-				{ id: "max", label: "Check CI configuration", startedOffset: 27_500, activity: activityTool },
-				{ id: "zoe", label: "Investigate slow queries", startedOffset: 12_000, activity: activityThinking },
+				{ id: "max", label: CI_LABEL, startedOffset: 27_500, activity: activityTool },
+				{ id: "zoe", label: QUERIES_LABEL, startedOffset: 12_000, activity: activityThinking },
 				{ id: "kai", removed: "stopped" },
 			],
 			status: "stop",
@@ -678,34 +685,33 @@ const pathA: LifecyclePath = {
 				{ kind: "agent", args: bgArgs, details: details({ runInBackground: true }), isPartial: false },
 				{
 					kind: "agent",
-					args: { ...bgArgs, label: "Investigate slow queries", prompt: "Find slow queries on the orders table." },
-					details: details({ runInBackground: true, label: "Investigate slow queries" }),
+					args: { ...bgArgs, label: QUERIES_LABEL, prompt: QUERIES_PROMPT },
+					details: details({ runInBackground: true, label: QUERIES_LABEL }),
 					isPartial: false,
 				},
 				{
 					kind: "agent",
 					args: {
 						...bgArgs,
-						label: "Audit the reports table",
-						prompt: "Audit the reports table for stale aggregates.",
+						label: REPORTS_LABEL,
+						prompt: REPORTS_PROMPT,
 					},
-					details: details({ runInBackground: true, label: "Audit the reports table" }),
+					details: details({ runInBackground: true, label: REPORTS_LABEL }),
 					isPartial: false,
 				},
 				{
 					kind: "control",
 					args: { to: "zoe", message: "Focus on indexes in the orders table" },
 					details: {
-						label: "Investigate slow queries",
-						message:
-							"Focus on indexes and slow queries in the orders table\nSecond line: focus on the result.\nThird: wrap up when done.",
+						label: QUERIES_LABEL,
+						message: QUERIES_STEER,
 					},
 					isPartial: false,
 				},
 				{
 					kind: "control",
 					args: { agent_id: "kai" },
-					details: { label: "Audit the reports table" },
+					details: { label: REPORTS_LABEL },
 					isPartial: false,
 				},
 				{
@@ -713,7 +719,7 @@ const pathA: LifecyclePath = {
 					details: {
 						status: "completed",
 						agent_id: "max",
-						label: "Check CI configuration",
+						label: CI_LABEL,
 						model: p.model,
 						thinking: p.thinking,
 						result: "Found 5 flaky tests. All share the `retries: 0` flag.",
@@ -724,7 +730,7 @@ const pathA: LifecyclePath = {
 				},
 			],
 			widget: [
-				{ id: "zoe", label: "Investigate slow queries", startedOffset: 12_000, activity: activityThinking },
+				{ id: "zoe", label: QUERIES_LABEL, startedOffset: 12_000, activity: activityThinking },
 				{ id: "max", removed: "done" },
 			],
 			status: "notify",
@@ -736,34 +742,33 @@ const pathA: LifecyclePath = {
 				{ kind: "agent", args: bgArgs, details: details({ runInBackground: true }), isPartial: false },
 				{
 					kind: "agent",
-					args: { ...bgArgs, label: "Investigate slow queries", prompt: "Find slow queries on the orders table." },
-					details: details({ runInBackground: true, label: "Investigate slow queries" }),
+					args: { ...bgArgs, label: QUERIES_LABEL, prompt: QUERIES_PROMPT },
+					details: details({ runInBackground: true, label: QUERIES_LABEL }),
 					isPartial: false,
 				},
 				{
 					kind: "agent",
 					args: {
 						...bgArgs,
-						label: "Audit the reports table",
-						prompt: "Audit the reports table for stale aggregates.",
+						label: REPORTS_LABEL,
+						prompt: REPORTS_PROMPT,
 					},
-					details: details({ runInBackground: true, label: "Audit the reports table" }),
+					details: details({ runInBackground: true, label: REPORTS_LABEL }),
 					isPartial: false,
 				},
 				{
 					kind: "control",
 					args: { to: "zoe", message: "Focus on indexes in the orders table" },
 					details: {
-						label: "Investigate slow queries",
-						message:
-							"Focus on indexes and slow queries in the orders table\nSecond line: focus on the result.\nThird: wrap up when done.",
+						label: QUERIES_LABEL,
+						message: QUERIES_STEER,
 					},
 					isPartial: false,
 				},
 				{
 					kind: "control",
 					args: { agent_id: "kai" },
-					details: { label: "Audit the reports table" },
+					details: { label: REPORTS_LABEL },
 					isPartial: false,
 				},
 				{
@@ -771,7 +776,7 @@ const pathA: LifecyclePath = {
 					details: {
 						status: "completed",
 						agent_id: "max",
-						label: "Check CI configuration",
+						label: CI_LABEL,
 						model: p.model,
 						thinking: p.thinking,
 						result: "Found 5 flaky tests. All share the `retries: 0` flag.",
@@ -785,7 +790,7 @@ const pathA: LifecyclePath = {
 					details: {
 						status: "completed",
 						agent_id: "zoe",
-						label: "Investigate slow queries",
+						label: QUERIES_LABEL,
 						model: p.model,
 						thinking: p.thinking,
 						result: "Slow query found: orders.idx_created_at missing; added.",
@@ -949,14 +954,14 @@ const pathE: LifecyclePath = {
 					details: {
 						status: "completed",
 						agent_id: "max",
-						label: "Check CI configuration",
+						label: CI_LABEL,
 						result: "Found 5 issues, all flaky tests traced to shared setup.",
 						usage: { durationMs: 27_500, tokens: 1250, toolUses: 3 },
 						idle: true,
 					},
 				},
 			],
-			widget: [{ id: "max", label: "Check CI configuration", startedOffset: 27_500, idle: true }],
+			widget: [{ id: "max", label: CI_LABEL, startedOffset: 27_500, idle: true }],
 		},
 		{
 			name: "message wakes",
@@ -968,7 +973,7 @@ const pathE: LifecyclePath = {
 					details: {
 						status: "completed",
 						agent_id: "max",
-						label: "Check CI configuration",
+						label: CI_LABEL,
 						result: "Found 5 issues, all flaky tests traced to shared setup.",
 						usage: { durationMs: 27_500, tokens: 1250, toolUses: 3 },
 						idle: true,
@@ -976,12 +981,12 @@ const pathE: LifecyclePath = {
 				},
 				{
 					kind: "control",
-					args: { to: "max", message: "Continue: write a fix PR description for each of the five issues" },
-					details: { to: "max", message: "Continue: write a fix PR description for each of the five issues" },
+					args: { to: "max", message: CI_FOLLOW_UP },
+					details: { to: "max", message: CI_FOLLOW_UP },
 					isPartial: true,
 				},
 			],
-			widget: [{ id: "max", label: "Check CI configuration", startedOffset: 27_500, activity: activityTool }],
+			widget: [{ id: "max", label: CI_LABEL, startedOffset: 27_500, activity: activityTool }],
 		},
 		{
 			name: "delivered",
@@ -994,7 +999,7 @@ const pathE: LifecyclePath = {
 					details: {
 						status: "completed",
 						agent_id: "max",
-						label: "Check CI configuration",
+						label: CI_LABEL,
 						result: "Found 5 issues, all flaky tests traced to shared setup.",
 						usage: { durationMs: 27_500, tokens: 1250, toolUses: 3 },
 						idle: true,
@@ -1002,16 +1007,16 @@ const pathE: LifecyclePath = {
 				},
 				{
 					kind: "control",
-					args: { to: "max", message: "Continue: write a fix PR description for each of the five issues" },
+					args: { to: "max", message: CI_FOLLOW_UP },
 					details: {
 						to: "max",
-						label: "Check CI configuration",
-						message: "Continue: write a fix PR description for each of the five issues",
+						label: CI_LABEL,
+						message: CI_FOLLOW_UP,
 					},
 					isPartial: false,
 				},
 			],
-			widget: [{ id: "max", label: "Check CI configuration", startedOffset: 27_500, activity: activityTool }],
+			widget: [{ id: "max", label: CI_LABEL, startedOffset: 27_500, activity: activityTool }],
 		},
 		{
 			name: "stop",
@@ -1020,17 +1025,17 @@ const pathE: LifecyclePath = {
 				{ kind: "agent", args: p, details: details({ runInBackground: true }), isPartial: false },
 				{
 					kind: "control",
-					args: { to: "max", message: "Continue: write a fix PR description for each of the five issues" },
+					args: { to: "max", message: CI_FOLLOW_UP },
 					details: {
 						to: "max",
-						label: "Check CI configuration",
-						message: "Continue: write a fix PR description for each of the five issues",
+						label: CI_LABEL,
+						message: CI_FOLLOW_UP,
 					},
 					isPartial: false,
 				},
-				{ kind: "control", args: { agent_id: "max" }, details: { label: "Check CI configuration" }, isPartial: true },
+				{ kind: "control", args: { agent_id: "max" }, details: { label: CI_LABEL }, isPartial: true },
 			],
-			widget: [{ id: "max", label: "Check CI configuration", startedOffset: 27_500, activity: activityTool }],
+			widget: [{ id: "max", label: CI_LABEL, startedOffset: 27_500, activity: activityTool }],
 		},
 		{
 			name: "stopped",
@@ -1040,15 +1045,15 @@ const pathE: LifecyclePath = {
 				{ kind: "agent", args: p, details: details({ runInBackground: true }), isPartial: false },
 				{
 					kind: "control",
-					args: { to: "max", message: "Continue: write a fix PR description for each of the five issues" },
+					args: { to: "max", message: CI_FOLLOW_UP },
 					details: {
 						to: "max",
-						label: "Check CI configuration",
-						message: "Continue: write a fix PR description for each of the five issues",
+						label: CI_LABEL,
+						message: CI_FOLLOW_UP,
 					},
 					isPartial: false,
 				},
-				{ kind: "control", args: { agent_id: "max" }, details: { label: "Check CI configuration" }, isPartial: false },
+				{ kind: "control", args: { agent_id: "max" }, details: { label: CI_LABEL }, isPartial: false },
 			],
 		},
 	],

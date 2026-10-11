@@ -296,8 +296,9 @@ export function buildSpawnParamsSchema(hasParent: boolean): ReturnType<typeof Ty
 					run_in_background: Type.Optional(
 						Type.Boolean({
 							description:
-								"Default true: return an agent id immediately; the completion notification " +
-								"carries the result. Set false to block until the result is ready.",
+								"Default true in interactive and RPC sessions, false in print/json mode (the host " +
+								"exits after its reply). true returns an agent id immediately and the completion " +
+								"notification carries the result; false blocks until the result is ready.",
 						}),
 					),
 				}),
@@ -416,6 +417,8 @@ const CHILD_PROMPT_NOTE =
 /** The tools subagent_enable activates (registered with defaultActive: false). */
 const SUBAGENT_TOOL_NAMES = ["agent_spawn", "agent_stop", "agent_send"] as const;
 const ENABLE_TOOL_NAME = "subagent_enable";
+/** The packaged coordination skill (skills/pi-subagents-workflow). */
+const WORKFLOW_SKILL_NAME = "pi-subagents-workflow";
 
 /** Whether the transcript's last word on the agent tools is "added" — i.e. the
  *  conversation had enabled them. */
@@ -435,11 +438,12 @@ function transcriptEnabledAgentTools(ctx: ExtensionContext): boolean {
 export default function (pi: ExtensionAPI) {
 	// Spawn depth limit (pi-subagents.json `maxDepth`, default 1: sub-agents
 	// cannot spawn). The main session's limit travels down the tree; at the
-	// limit this process registers no agent tools at all — no schema, no
-	// guidelines, nothing to enable.
+	// limit this process registers no agent tools at all — no schema, nothing
+	// to enable — and hides the coordination skill it could not act on.
 	const { config, warnings: configWarnings } = loadConfig();
 	const maxDepth = envInt(process.env.PI_SUBAGENT_MAX_DEPTH) ?? config.maxDepth;
 	const canSpawn = canSpawnAt(MY_DEPTH, maxDepth);
+	const childrenCanSpawn = canSpawnAt(MY_DEPTH + 1, maxDepth);
 	const registerTool: ExtensionAPI["registerTool"] = canSpawn ? pi.registerTool.bind(pi) : () => {};
 	/** Identity and depth for a child process. */
 	const childEnv = (agentId: string): NodeJS.ProcessEnv => ({
@@ -447,6 +451,13 @@ export default function (pi: ExtensionAPI) {
 		PI_SUBAGENT_DEPTH: String(MY_DEPTH + 1),
 		PI_SUBAGENT_MAX_DEPTH: String(maxDepth),
 	});
+	if (!canSpawn) {
+		pi.on("before_agent_start", (event) => {
+			event.systemPromptOptions.skills = event.systemPromptOptions.skills.filter(
+				(skill) => skill.name !== WORKFLOW_SKILL_NAME,
+			);
+		});
+	}
 
 	// pi's agent-core drops the execute() isError flag when a tool returns
 	// normally (bash gets its error background by throwing instead) — see
@@ -514,7 +525,7 @@ export default function (pi: ExtensionAPI) {
 
 	// ── subagent_enable ─────────────────────────────────
 	// The three agent tools are registered inactive so a conversation that
-	// never delegates carries no schema or guidelines for them; this
+	// never delegates carries no schema for them; this
 	// parameterless loader activates them on demand (same pattern as
 	// web_enable / session_hub_enable). The activation is recorded in the
 	// transcript, so a resumed session keeps the tools.
@@ -524,7 +535,7 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"Enable the sub-agent tools (agent_spawn, agent_stop, agent_send). Does not spawn anything. " +
 			"Enabled tools are available on the next model request. " +
-			"For coordination rules, read the pi-subagents-workflow skill if available.",
+			`For coordination rules, read the ${WORKFLOW_SKILL_NAME} skill if available.`,
 		promptSnippet: "Activate agent_spawn, agent_send, and agent_stop",
 		parameters: Type.Object({}, { additionalProperties: false }),
 		async execute() {
@@ -557,7 +568,9 @@ export default function (pi: ExtensionAPI) {
 				: "Background spawns return an agent id immediately. Ready replies enter together after the current " +
 					"response and tool batch, before the next model request; an idle parent wakes once for the ready batch. " +
 					"Foreground spawns wait and return the result directly. ") +
-			"At the default maxDepth=1, children have no agent tools. " +
+			(childrenCanSpawn
+				? `Children can spawn their own sub-agents (maxDepth=${maxDepth}). `
+				: "Children have no agent tools. ") +
 			"Large results are truncated with a path to the full output.",
 		promptSnippet: "Start a sub-agent with an independent context",
 		parameters: SpawnParamsSchema,
@@ -936,7 +949,7 @@ export default function (pi: ExtensionAPI) {
 							{
 								type: "text",
 								text: outcome.resident
-									? `${truncateForContext(outcome.output)}${maybeWriteFullOutput(agent.agentId, outcome.output)}\n\n(agent @${agent.agentId} is idle and its saved conversation can be continued with agent_send.)`
+									? `${truncateForContext(outcome.output)}${maybeWriteFullOutput(agent.agentId, outcome.output)}\n\n(agent @${agent.agentId} is idle; agent_send continues its saved conversation and starts a new model turn.)`
 									: truncateForContext(outcome.output) + maybeWriteFullOutput(agent.agentId, outcome.output),
 							},
 						],
@@ -1038,7 +1051,8 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"Send a message to a direct child, or to @parent when this tool is available in a child. " +
 			"Delivered after the target's current response and tool batch, before its next model request. " +
-			"Starts a new model turn for idle children or resumes exited children with recoverable saved sessions. " +
+			"Starts a new model turn for idle children, whose reply arrives as another completion, or resumes exited " +
+			"children with recoverable saved sessions. " +
 			"The child's final reply is returned automatically.",
 		promptSnippet: "Send a message to an existing sub-agent",
 		parameters: SendParamsSchema,

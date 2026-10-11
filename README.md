@@ -97,7 +97,7 @@ The three agent tools are registered **inactive**: a conversation that never del
 
 The package includes [`pi-subagents-workflow`](skills/pi-subagents-workflow/SKILL.md), the single source of instructions for task boundaries, parallel work, file ownership, follow-ups, and checks. It does not define preset agent roles or enforce a workflow at runtime.
 
-When the whole package is loaded, a new session sees the skill's name, description, and path immediately, independently of `subagent_enable`. The full instructions enter context only when the model reads the skill or you invoke `/skill:pi-subagents-workflow`. Package skill filters and `--no-skills` can disable discovery. Loading only `index.ts` with `-e` does not include the packaged skill.
+When the whole package is loaded, a new session sees the skill's name, description, and path immediately, independently of `subagent_enable`. The full instructions enter context only when the model reads the skill or you invoke `/skill:pi-subagents-workflow`. Package skill filters and `--no-skills` can disable discovery. Loading only `index.ts` with `-e` does not include the packaged skill. A sub-agent that cannot spawn (at the default depth, every sub-agent) does not see the skill.
 
 Tool descriptions explain what each call does; the skill explains how the main agent coordinates work. Children receive a short task suffix explaining automatic final replies, even if they do not load the skill.
 

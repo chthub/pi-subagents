@@ -41,6 +41,10 @@ test("package exposes skill metadata at startup without enabling agent tools or 
 	assert.equal(loader.getExtensions().extensions.length, 0, "skill discovery does not require tool activation");
 	const prompt = formatSkillsForPrompt(packaged);
 	assert.match(prompt, /Coordinate delegated work with agent_spawn, agent_send, and agent_stop/);
+	assert.match(
+		prompt,
+		/the user asks for sub-agents, a task would flood your context with verbose output, or it splits into independent parallel parts/,
+	);
 	assert.ok(prompt.includes(skillPath));
 	assert.doesNotMatch(prompt, /Only one agent may change|Avoid unnecessary messages and stops/);
 });
