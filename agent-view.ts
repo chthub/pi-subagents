@@ -21,6 +21,8 @@ import {
 	Key,
 	matchesKey,
 	type TUI,
+	type TuiMouseEvent,
+	type TuiMouseEventResult,
 	truncateToWidth,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
@@ -65,6 +67,12 @@ export class AgentView implements Component, Focusable {
 	private scroll = 0;
 	private viewport = 10;
 	private contentHeight = 0;
+	/** Geometry from the last render, in component-local terminal cells. */
+	private scrollbar:
+		| { x: number; y: number; height: number; thumbHeight: number; thumbTop: number; maxScroll: number }
+		| undefined;
+	private dragGrabOffset: number | undefined;
+	private scrollbarHovered = false;
 	private expanded = false;
 	private notice = "";
 	private sending = false;
@@ -107,9 +115,18 @@ export class AgentView implements Component, Focusable {
 	set focused(value: boolean) {
 		this._focused = value;
 		this.editor.focused = value; // IME candidate window follows the editor cursor
+		if (!value) {
+			const active = this.scrollbarHovered || this.dragGrabOffset !== undefined;
+			this.dragGrabOffset = undefined;
+			this.scrollbarHovered = false;
+			if (active) this.tui.requestRender();
+		}
 	}
 
 	dispose(): void {
+		this.dragGrabOffset = undefined;
+		this.scrollbarHovered = false;
+		this.scrollbar = undefined;
 		this.unsubscribeEvents?.();
 		this.unsubscribeRoster();
 		this.animation?.unsubscribe();
@@ -124,6 +141,7 @@ export class AgentView implements Component, Focusable {
 	}
 
 	handleInput(data: string): void {
+		this.dragGrabOffset = undefined;
 		if (matchesKey(data, Key.escape)) {
 			this.done();
 			return;
@@ -145,10 +163,51 @@ export class AgentView implements Component, Focusable {
 		this.tui.requestRender();
 	}
 
-	handleMouse(event: { type: string; wheelDelta?: number }): { handled: boolean } | undefined {
-		if (event.type !== "wheel" || !event.wheelDelta) return { handled: true };
-		this.scrollBy(-event.wheelDelta);
-		return { handled: true };
+	handleMouse(event: TuiMouseEvent): TuiMouseEventResult {
+		const rail = this.scrollbar;
+		const wasActive = this.scrollbarHovered || this.dragGrabOffset !== undefined;
+		this.scrollbarHovered =
+			!!rail && rail.maxScroll > 0 && event.x === rail.x && event.y >= rail.y && event.y < rail.y + rail.height;
+		if (event.type === "wheel" && event.wheelDelta) {
+			this.dragGrabOffset = undefined;
+			this.scrollBy(-event.wheelDelta);
+			return { handled: true };
+		}
+		if (event.type === "release") {
+			this.dragGrabOffset = undefined;
+			return { handled: true, render: wasActive !== this.scrollbarHovered };
+		}
+		if (event.type === "drag" && this.dragGrabOffset !== undefined) {
+			if (event.button === "left") this.scrollToPointer(event.y, this.dragGrabOffset);
+			else this.dragGrabOffset = undefined;
+			return { handled: true };
+		}
+		if (event.type === "press") {
+			this.dragGrabOffset = undefined;
+			if (event.button === "left" && rail && this.scrollbarHovered) {
+				const row = event.y - rail.y;
+				const onThumb = row >= rail.thumbTop && row < rail.thumbTop + rail.thumbHeight;
+				this.dragGrabOffset = onThumb ? row - rail.thumbTop : Math.floor(rail.thumbHeight / 2);
+				// Match native ScrollView: grab the thumb without jumping; a track
+				// press centers it on the pointer, then continues as a drag.
+				if (!onThumb) this.scrollToPointer(event.y, this.dragGrabOffset);
+				return { handled: true, capture: true };
+			}
+		}
+		// Keep overlay input from falling through to the main conversation.
+		// In particular, the synthetic click after release must not jump again.
+		return { handled: true, render: wasActive !== (this.scrollbarHovered || this.dragGrabOffset !== undefined) };
+	}
+
+	private scrollToPointer(y: number, grabOffset: number): void {
+		const rail = this.scrollbar;
+		if (!rail) return;
+		const travel = rail.height - rail.thumbHeight;
+		if (travel <= 0 || rail.maxScroll <= 0) return;
+		const offset = Math.max(0, Math.min(travel, y - rail.y - Math.min(grabOffset, rail.thumbHeight - 1)));
+		// The view stores distance from the bottom; the rail measures from top.
+		this.scroll = rail.maxScroll - Math.round((offset / travel) * rail.maxScroll);
+		this.tui.requestRender();
 	}
 
 	render(width: number): string[] {
@@ -175,12 +234,29 @@ export class AgentView implements Component, Focusable {
 			const thumbTop = maxScroll
 				? Math.round(((maxScroll - this.scroll) / maxScroll) * (this.viewport - thumbHeight))
 				: 0;
+			if (
+				this.scrollbar?.x !== width - 1 ||
+				this.scrollbar.y !== header.length ||
+				this.scrollbar.height !== this.viewport ||
+				maxScroll === 0
+			) {
+				this.dragGrabOffset = undefined;
+				this.scrollbarHovered = false;
+			}
+			this.scrollbar = { x: width - 1, y: header.length, height: this.viewport, thumbHeight, thumbTop, maxScroll };
+			// Like native ScrollView, fill the cell on hover/drag instead of
+			// changing the content width (which would rewrap text and move the rail).
+			const thumbGlyph = this.scrollbarHovered || this.dragGrabOffset !== undefined ? "█" : "┃";
 			for (let i = 0; i < visible.length; i++) {
 				const thumb = i >= thumbTop && i < thumbTop + thumbHeight;
 				visible[i] =
 					truncateToWidth(visible[i], contentWidth, "", true) +
-					this.theme.fg(thumb ? "accent" : "borderMuted", thumb ? "┃" : "│");
+					this.theme.fg(thumb ? "accent" : "borderMuted", thumb ? thumbGlyph : "│");
 			}
+		} else {
+			this.scrollbar = undefined;
+			this.dragGrabOffset = undefined;
+			this.scrollbarHovered = false;
 		}
 		const footer = [this.renderFooter(width)];
 

@@ -107,7 +107,7 @@ Below the editor, one line per sub-agent of this conversation — running, idle,
 - **Click a line** (fullscreen TUI mode, pi's default) or run **`/agents`** (`/agents max` opens one directly) to open that agent's full-screen view: its whole conversation rendered with pi's own components, streaming live while it runs.
 - **Type in the view to talk to that agent directly.** This is a side chat: the answers stay in the agent's session and are **not** reported to the main agent. A finished agent is revived from its session file (`pi --mode rpc --session <path>`) by the first message you send, then stays resident (idle) until the main session ends or `agent_stop`.
 - **Hover** highlights the line under the pointer. pi turns off pointer-motion reports inside tmux, zellij and screen, so there is no hover highlight there; clicks still work.
-- **Esc** returns to the main conversation. PgUp/PgDn or the mouse wheel scroll; ctrl+o expands tool output.
+- **Esc** returns to the main conversation. PgUp/PgDn or the mouse wheel scroll; drag the right-hand scrollbar thumb or click its track to jump (fullscreen mouse input required). Dragging to the bottom follows new output again. The thumb widens from `┃` to `█` on hover or while dragging, without rewrapping the conversation; hover requires terminal pointer-motion reporting. ctrl+o expands tool output.
 - The list is rebuilt from the transcript on resume or `/reload` (processes don't survive those; their sessions do).
 
 ## Configuration
