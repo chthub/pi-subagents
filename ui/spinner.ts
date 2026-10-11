@@ -32,6 +32,16 @@ export function formatDuration(ms: number): string {
 	return `${(ms / 1000).toFixed(1)}s`;
 }
 
+/** Compact English elapsed time for the bottom agent list (seconds, then minutes). */
+export function formatElapsed(ms: number): string {
+	const tenths = Math.max(0, Math.round(ms / 100));
+	if (tenths < 600) return `${(tenths / 10).toFixed(1)}s`;
+	const seconds = Math.floor(tenths / 10);
+	const minutes = Math.floor(seconds / 60);
+	const remainder = seconds % 60;
+	return remainder ? `${minutes}m ${remainder}s` : `${minutes}m`;
+}
+
 /**
  * Duration meta shared by tool views: a live `Elapsed` while running (wall
  * clock, updates every frame), a fixed `Took` once complete. Pass the task's

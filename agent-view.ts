@@ -24,6 +24,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
+import { AssistantStream } from "./assistant-stream.js";
 import type { RpcEvent } from "./protocol.js";
 import { isTerminal, type RosterEntry } from "./roster.js";
 import { buildTranscript } from "./transcript.js";
@@ -59,10 +60,11 @@ export class AgentView implements Component, Focusable {
 	private transcript: Container = new Container();
 	private transcriptCache: { width: number; lines: string[] } | undefined;
 	/** The live assistant turn, built from streamed deltas until message_end. */
-	private streaming: { message: AssistantMessage; component: AssistantMessageComponent } | undefined;
+	private streaming: { stream: AssistantStream; component: AssistantMessageComponent; ended: boolean } | undefined;
 	/** Lines scrolled up from the bottom (0 = follow the end). */
 	private scroll = 0;
 	private viewport = 10;
+	private contentHeight = 0;
 	private expanded = false;
 	private notice = "";
 	private sending = false;
@@ -153,15 +155,34 @@ export class AgentView implements Component, Focusable {
 		const rows = Math.max(8, this.tui.terminal.rows);
 		const header = this.renderHeader(width);
 		const editorLines = this.editor.render(width);
-		const footer = [this.renderFooter(width)];
-		this.viewport = Math.max(3, rows - header.length - editorLines.length - footer.length);
+		this.viewport = Math.max(3, rows - header.length - editorLines.length - 1);
 
-		const body = [...this.transcriptLines(width), ...this.streamingLines(width)];
+		// This overlay renders its own bounded viewport rather than exposing
+		// a ScrollView layout node. Reserve one column for a visible scroll rail.
+		const contentWidth = Math.max(1, width - 1);
+		const body = [...this.transcriptLines(contentWidth), ...this.streamingLines(contentWidth)];
+		this.contentHeight = body.length;
 		const maxScroll = Math.max(0, body.length - this.viewport);
 		this.scroll = Math.min(this.scroll, maxScroll);
 		const end = body.length - this.scroll;
 		const visible = body.slice(Math.max(0, end - this.viewport), end);
 		while (visible.length < this.viewport) visible.unshift("");
+		if (width > 1) {
+			const thumbHeight = Math.max(
+				2,
+				Math.min(this.viewport, Math.round(this.viewport ** 2 / Math.max(1, body.length))),
+			);
+			const thumbTop = maxScroll
+				? Math.round(((maxScroll - this.scroll) / maxScroll) * (this.viewport - thumbHeight))
+				: 0;
+			for (let i = 0; i < visible.length; i++) {
+				const thumb = i >= thumbTop && i < thumbTop + thumbHeight;
+				visible[i] =
+					truncateToWidth(visible[i], contentWidth, "", true) +
+					this.theme.fg(thumb ? "accent" : "borderMuted", thumb ? "┃" : "│");
+			}
+		}
+		const footer = [this.renderFooter(width)];
 
 		// Pad every line to the full width: the overlay must cover the main view.
 		return [...header, ...visible, ...editorLines, ...footer].map((line) => truncateToWidth(line, width, "", true));
@@ -212,8 +233,10 @@ export class AgentView implements Component, Focusable {
 		if (this.reloadTimer) clearTimeout(this.reloadTimer);
 		this.reloadTimer = setTimeout(() => {
 			this.reloadTimer = undefined;
+			const live = this.streaming?.ended ? this.streaming : undefined;
 			void this.reload().then(() => {
-				this.streaming = undefined;
+				// A slow replay must not erase a new turn or an unfinished stream.
+				if (live && this.streaming === live) this.streaming = undefined;
 				this.tui.requestRender();
 			});
 		}, 60);
@@ -224,18 +247,29 @@ export class AgentView implements Component, Focusable {
 			case "message_start": {
 				const message = event.message as AssistantMessage | undefined;
 				if (message?.role !== "assistant") return;
-				const copy = { ...message, content: [...(message.content ?? [])] } as AssistantMessage;
+				const stream = new AssistantStream(message);
 				this.streaming = {
-					message: copy,
-					component: new AssistantMessageComponent(copy, false, getMarkdownTheme()),
+					stream,
+					component: new AssistantMessageComponent(stream.message, false, getMarkdownTheme()),
+					ended: false,
 				};
 				this.tui.requestRender();
 				return;
 			}
 			case "message_update":
-				this.applyDelta(event.assistantMessageEvent as { type: string; contentIndex?: number; delta?: string });
+				this.applyDelta(event.assistantMessageEvent);
 				return;
-			case "message_end":
+			case "message_end": {
+				const message = event.message as AssistantMessage | undefined;
+				if (message?.role === "assistant" && this.streaming) {
+					this.streaming.stream = new AssistantStream(message);
+					this.streaming.ended = true;
+					this.streaming.component.updateContent(this.streaming.stream.message, false);
+					this.tui.requestRender();
+				}
+				this.scheduleReload();
+				return;
+			}
 			case "tool_execution_end":
 			case "agent_end":
 				this.scheduleReload();
@@ -243,17 +277,11 @@ export class AgentView implements Component, Focusable {
 		}
 	}
 
-	/** Fold one streamed delta into the live assistant message. */
-	private applyDelta(delta: { type: string; contentIndex?: number; delta?: string } | undefined): void {
+	/** Fold one wire content-block event into a dense live assistant message. */
+	private applyDelta(delta: unknown): void {
 		const live = this.streaming;
-		if (!live || !delta || delta.contentIndex === undefined || typeof delta.delta !== "string") return;
-		const content = live.message.content as unknown as Record<string, unknown>[];
-		const kind = delta.type === "text_delta" ? "text" : delta.type === "thinking_delta" ? "thinking" : undefined;
-		if (!kind) return;
-		const block = content[delta.contentIndex] ?? { type: kind, [kind]: "" };
-		content[delta.contentIndex] = block;
-		block[kind] = `${block[kind] ?? ""}${delta.delta}`;
-		live.component.updateContent(live.message, true);
+		if (!live || live.ended || !live.stream.apply(delta)) return;
+		live.component.updateContent(live.stream.message, true);
 		this.tui.requestRender();
 	}
 
@@ -356,6 +384,11 @@ export class AgentView implements Component, Focusable {
 		const hint = finished ? "已结束 — 发消息会复活它 · " : "";
 		const keys = "Enter 发送 · PgUp/PgDn 滚动 · Esc 返回";
 		const notice = this.notice ? `${this.notice} · ` : "";
-		return truncateToWidth(t.fg("dim", ` ${notice}${hint}${keys} · 不会通知主 agent`), width, "…");
+		const end = this.contentHeight - this.scroll;
+		const position =
+			this.contentHeight > this.viewport
+				? `${Math.max(1, end - this.viewport + 1)}–${end}/${this.contentHeight} · `
+				: "";
+		return truncateToWidth(t.fg("dim", ` ${position}${notice}${hint}${keys} · 不会通知主 agent`), width, "…");
 	}
 }

@@ -148,6 +148,8 @@ interface SpawnResultDetails {
 interface NotificationDetailsLite {
 	status?: string;
 	agent_id?: string;
+	label?: string;
+	model?: string;
 	idle?: boolean;
 	sessionPath?: string;
 	usage?: { durationMs?: number | null };
@@ -159,9 +161,13 @@ interface NotificationDetailsLite {
  * reported stopped, and a resident (idle) agent is done — both can be revived
  * from their session file.
  */
-export function rosterFromMessages(messages: readonly TranscriptMessage[], cwd?: string): RosterEntry[] {
+export function rosterFromMessages(
+	messages: readonly TranscriptMessage[],
+	cwd?: string,
+	initialEntries: readonly RosterEntry[] = [],
+): RosterEntry[] {
 	const args = new Map<string, SpawnArgs>();
-	const entries = new Map<string, RosterEntry>();
+	const entries = new Map(initialEntries.map((entry) => [entry.agentId, structuredClone(entry)]));
 
 	for (const m of messages) {
 		if (m.role === "assistant" && Array.isArray(m.content)) {
@@ -175,26 +181,44 @@ export function rosterFromMessages(messages: readonly TranscriptMessage[], cwd?:
 			const d = (m.details ?? {}) as SpawnResultDetails;
 			if (!d.agentId) continue; // never spawned (validation / model error)
 			const a = args.get(m.toolCallId ?? "") ?? {};
+			const previous = entries.get(d.agentId);
 			const failed = m.isError || d.error !== undefined;
 			entries.set(d.agentId, {
 				agentId: d.agentId,
-				label: d.label ?? a.label ?? d.agentId,
-				// A background spawn's outcome arrives later as a notification.
-				status: failed ? "failed" : d.runInBackground ? "running" : "done",
-				startedAt: d.startedAt ?? m.timestamp ?? 0,
-				endedAt: d.runInBackground ? undefined : (d.endedAt ?? m.timestamp),
-				sessionPath: d.sessionPath,
-				model: d.model,
-				tools: a.tools,
-				cwd,
-				indent: 0,
+				label: d.label ?? a.label ?? previous?.label ?? d.agentId,
+				// A delayed background result must not undo a completion snapshot.
+				status: failed ? "failed" : d.runInBackground ? (previous?.status ?? "running") : "done",
+				startedAt: d.startedAt ?? previous?.startedAt ?? m.timestamp ?? 0,
+				endedAt: d.runInBackground ? previous?.endedAt : (d.endedAt ?? previous?.endedAt ?? m.timestamp),
+				sessionPath: d.sessionPath ?? previous?.sessionPath,
+				model: d.model ?? previous?.model,
+				tools: a.tools ?? previous?.tools,
+				cwd: previous?.cwd ?? cwd,
+				indent: previous?.indent ?? 0,
+				parentId: previous?.parentId,
 			});
 			continue;
 		}
 		if (m.role === "custom" && m.customType === "subagent-notification") {
 			const d = (m.details ?? {}) as NotificationDetailsLite;
-			const entry = d.agent_id ? entries.get(d.agent_id.replace(/^@/, "")) : undefined;
-			if (!entry) continue;
+			const agentId = d.agent_id?.replace(/^@/, "");
+			if (!agentId) continue;
+			let entry = entries.get(agentId);
+			if (!entry) {
+				// Nested tool calls (e.g. codemode) have no standalone spawn result.
+				// Their completion notification still identifies the child session.
+				const prefix = `@${agentId} — `;
+				entry = {
+					agentId,
+					label: d.label?.startsWith(prefix) ? d.label.slice(prefix.length) : (d.label ?? agentId),
+					status: "done",
+					startedAt: Math.max(0, (m.timestamp ?? 0) - (d.usage?.durationMs ?? 0)),
+					model: d.model,
+					cwd,
+					indent: 0,
+				};
+				entries.set(agentId, entry);
+			}
 			entry.status = d.status === "failed" ? "failed" : d.status === "stopped" ? "stopped" : "done";
 			entry.sessionPath = d.sessionPath ?? entry.sessionPath;
 			entry.endedAt = d.usage?.durationMs ? entry.startedAt + d.usage.durationMs : m.timestamp;

@@ -16,7 +16,7 @@ import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { AgentProcess } from "./agent-process.js";
 import type { AgentActivity } from "./event-interpret.js";
 import { isTerminal, type Roster, type RosterActivity, type RosterEntry, type RosterStatus } from "./roster.js";
-import { formatDuration, SPINNER_TICK_MS, Spinner } from "./ui/spinner.js";
+import { formatElapsed, SPINNER_TICK_MS, Spinner } from "./ui/spinner.js";
 import { type TickerHandle, ticker } from "./ui/ticker.js";
 import type { WidgetResult, WidgetRow, WidgetStatus } from "./ui/widget.js";
 import { atId } from "./views.js";
@@ -33,7 +33,7 @@ interface MouseEventLite {
 }
 
 /** One SGR mouse report (`ESC [ < b ; x ; y M|m`); group 1 = the 1-based row. */
-const SGR_MOUSE = /\x1b\[<\d+;\d+;(\d+)[Mm]/g;
+const SGR_MOUSE = new RegExp(`${String.fromCharCode(27)}\\[<\\d+;\\d+;(\\d+)[Mm]`, "g");
 
 export class AgentWidget {
 	private registered = false;
@@ -221,9 +221,9 @@ const STATUS_ICON: Record<
 function statusMeta(entry: RosterEntry): string {
 	switch (entry.status) {
 		case "running":
-			return formatDuration(Date.now() - entry.startedAt);
+			return formatElapsed(Date.now() - entry.startedAt);
 		case "done":
-			return entry.endedAt && entry.startedAt ? formatDuration(entry.endedAt - entry.startedAt) : "done";
+			return entry.endedAt !== undefined ? formatElapsed(entry.endedAt - entry.startedAt) : "done";
 		default:
 			return entry.status;
 	}

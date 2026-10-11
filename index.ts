@@ -54,7 +54,8 @@ import { maybeWriteFullOutput, notifyCompletion, truncateForContext } from "./no
 import { type AgentMessage, formatFrom } from "./protocol.js";
 import { AgentRegistry, type WidgetSurface } from "./registry.js";
 import { renderNotification } from "./render.js";
-import { Roster, rosterFromMessages } from "./roster.js";
+import { Roster } from "./roster.js";
+import { persistRoster, rosterFromBranch } from "./roster-state.js";
 import { runSpawnSession, type SpawnOutcome } from "./spawn-session.js";
 import { fallbackRenderers } from "./transcript.js";
 import { createSubtreeDisplay } from "./tree-display.js";
@@ -1316,14 +1317,16 @@ export default function (pi: ExtensionAPI) {
 			// Best effort: the loader stays available to re-enable them.
 		}
 	};
-	// The roster a session start sees is its transcript's (resume, reload,
-	// session switch), plus any agent process still alive in this host.
+	// Restore from the full selected branch, not the compacted model context.
+	let unsubscribePersistence: (() => void) | undefined;
 	const rebuildRoster = (ctx: ExtensionContext): void => {
-		let entries: ReturnType<typeof rosterFromMessages> = [];
+		unsubscribePersistence?.();
+		unsubscribePersistence = undefined;
+		let entries: ReturnType<typeof rosterFromBranch> = [];
 		try {
-			entries = rosterFromMessages(buildSessionContext(ctx.sessionManager.getBranch()).messages, ctx.cwd);
-		} catch {
-			// A transcript we cannot read leaves the roster empty.
+			entries = rosterFromBranch(ctx.sessionManager.getBranch(), ctx.cwd);
+		} catch (err) {
+			if (ctx.mode === "tui") ctx.ui.notify(`Could not restore sub-agents: ${String(err)}`, "warning");
 		}
 		roster.reset(entries);
 		for (const agent of processes.values()) {
@@ -1340,18 +1343,34 @@ export default function (pi: ExtensionAPI) {
 		}
 		registry.reserveIds(roster.list().map((e) => e.agentId));
 		if (ctx.mode === "tui") {
+			// Pi clears widgets on reload/session changes. Re-register on the
+			// fresh UI even if the extension module's old instance was cached.
+			widget?.dispose();
+			widget = null;
 			viewUi = ctx.ui;
 			ensureWidget(ctx);
 		}
+		unsubscribePersistence = persistRoster(
+			roster,
+			(type, data) => pi.appendEntry(type, data),
+			(error) => {
+				if (ctx.mode === "tui") ctx.ui.notify(`Could not save sub-agent list: ${String(error)}`, "warning");
+			},
+		);
 	};
 	pi.on("session_start", (_event, ctx) => {
 		restoreAgentTools(ctx);
 		rebuildRoster(ctx);
 		if (ctx.mode === "tui") for (const warning of configWarnings) ctx.ui.notify(`pi-subagents: ${warning}`, "warning");
 	});
-	pi.on("session_tree", (_event, ctx) => restoreAgentTools(ctx));
+	pi.on("session_tree", (_event, ctx) => {
+		restoreAgentTools(ctx);
+		rebuildRoster(ctx);
+	});
 
 	pi.on("session_shutdown", async (event) => {
+		unsubscribePersistence?.();
+		unsubscribePersistence = undefined;
 		// Quit: the whole process is ending. Reload: pi rebuilds the extension
 		// runtime in the same process — emitSessionShutdownEvent(reason:"reload")
 		// fires on the OLD runner before it is invalidated, so this handler still

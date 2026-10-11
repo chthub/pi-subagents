@@ -1,8 +1,30 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { describe, it, test } from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { Roster } from "../roster.js";
-import { AgentWidget, activityToRows, pickVisible } from "../widget.js";
+import { formatElapsed, Spinner } from "../ui/spinner.js";
+import { AgentWidget, activityToRows, pickVisible, renderAgentLine } from "../widget.js";
+
+test("bottom list elapsed time uses English seconds and automatically switches to minutes", () => {
+	for (const [ms, expected] of [
+		[0, "0.0s"],
+		[12345, "12.3s"],
+		[59900, "59.9s"],
+		[59999, "1m"],
+		[60000, "1m"],
+		[65000, "1m 5s"],
+		[120000, "2m"],
+		[3600000, "60m"],
+	] as const)
+		assert.equal(formatElapsed(ms), expected);
+});
+
+test("running and completed bottom rows both use the compact elapsed time", (t) => {
+	t.mock.method(Date, "now", () => 65000);
+	const entry = { agentId: "max", label: "check", status: "running", startedAt: 0, indent: 0 } as const;
+	assert.match(renderAgentLine(entry, theme, new Spinner(), 4, 120), /1m 5s/);
+	assert.match(renderAgentLine({ ...entry, status: "done", endedAt: 65000 }, theme, new Spinner(), 4, 120), /1m 5s/);
+});
 
 describe("activityToRows — pure data (width clipping lives in the widget render layer)", () => {
 	it("maps short tool args to one tool row", () => {
@@ -137,7 +159,7 @@ describe("AgentWidget — the bottom agent list", () => {
 		const { ui, lines } = capture();
 		const w = new AgentWidget(ui, new Roster(), () => {});
 		w.add(agentRow("jude", "后台只读目录检查，确认没有修改任何文件并返回第一层条目".repeat(2)));
-		w.updateActivity("jude", { kind: "tool", name: "bash", args: "ls -la /home/user/projects/pi_development" });
+		w.updateActivity("jude", { kind: "tool", name: "bash", args: "ls -la /work/project" });
 		for (const width of [30, 60, 100]) {
 			for (const line of lines(width)) {
 				assert.ok(visibleWidth(line) <= width, `line wider than ${width}: ${line}`);
