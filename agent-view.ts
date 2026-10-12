@@ -4,9 +4,9 @@
  * Opened from the bottom agent list (click) or /agents. Shows the child's
  * transcript with pi's own message components, streams its live turn, and
  * has an editor: what you type goes to that agent (a side chat — its
- * answers are not reported to the main agent). Esc returns to the main
- * conversation. A finished agent is revived from its session file by the
- * first message you send.
+ * answers are not reported to the main agent). Ctrl+X twice stops a live
+ * agent. Esc returns to the main conversation. A finished agent is revived
+ * from its session file by the first message you send.
  */
 
 import type { AssistantMessage } from "@earendil-works/pi-ai";
@@ -26,6 +26,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
+import { AgentFooter, type AgentFooterData } from "./agent-footer.js";
 import { AssistantStream } from "./assistant-stream.js";
 import type { RpcEvent } from "./protocol.js";
 import { isTerminal, type RosterEntry } from "./roster.js";
@@ -47,6 +48,12 @@ export interface AgentViewDeps {
 	loadMessages(): Promise<unknown[]>;
 	/** Deliver a user message (reviving a finished agent). Resolves an error text, or undefined. */
 	send(text: string): Promise<string | undefined>;
+	/** Whether a live process is up to stop (not a nested telemetry row). */
+	canStop?(): boolean;
+	/** Stop the agent's process. Resolves an error text, or undefined. */
+	stop?(): Promise<string | undefined>;
+	/** pi's footer data for this agent (stats, model, its extensions' statuses). */
+	footer?(): Promise<AgentFooterData | undefined>;
 	/** Re-render the view when the roster changes. Returns the unsubscribe function. */
 	onRosterChange(listener: () => void): () => void;
 	renderers(toolName: string): ToolRenderers | undefined;
@@ -54,10 +61,12 @@ export interface AgentViewDeps {
 }
 
 const HEADER_LINES = 3;
+const STOP_KEY = Key.ctrl("x");
 
 export class AgentView implements Component, Focusable {
 	private _focused = false;
 	private readonly editor: Editor;
+	private readonly footer = new AgentFooter();
 	private readonly spinner = new Spinner();
 	private transcript: Container = new Container();
 	private transcriptCache: { width: number; lines: string[] } | undefined;
@@ -66,7 +75,6 @@ export class AgentView implements Component, Focusable {
 	/** Lines scrolled up from the bottom (0 = follow the end). */
 	private scroll = 0;
 	private viewport = 10;
-	private contentHeight = 0;
 	/** Geometry from the last render, in component-local terminal cells. */
 	private scrollbar:
 		| { x: number; y: number; height: number; thumbHeight: number; thumbTop: number; maxScroll: number }
@@ -76,6 +84,8 @@ export class AgentView implements Component, Focusable {
 	private expanded = false;
 	private notice = "";
 	private sending = false;
+	/** The first Ctrl+X armed the stop; the second one confirms it. */
+	private stopArmed = false;
 	private reloadTimer: NodeJS.Timeout | undefined;
 	private reloadSeq = 0;
 	private unsubscribeEvents: (() => void) | undefined;
@@ -142,6 +152,15 @@ export class AgentView implements Component, Focusable {
 
 	handleInput(data: string): void {
 		this.dragGrabOffset = undefined;
+		if (matchesKey(data, STOP_KEY)) {
+			void this.requestStop();
+			return;
+		}
+		if (this.stopArmed) {
+			// Any other key cancels a pending stop confirmation.
+			this.stopArmed = false;
+			this.notice = "";
+		}
 		if (matchesKey(data, Key.escape)) {
 			this.done();
 			return;
@@ -214,13 +233,14 @@ export class AgentView implements Component, Focusable {
 		const rows = Math.max(8, this.tui.terminal.rows);
 		const header = this.renderHeader(width);
 		const editorLines = this.editor.render(width);
-		this.viewport = Math.max(3, rows - header.length - editorLines.length - 1);
+		// pi's own footer lines for this agent, then this view's key line last.
+		const footerLines = this.footer.render(width);
+		this.viewport = Math.max(3, rows - header.length - editorLines.length - footerLines.length - 1);
 
 		// This overlay renders its own bounded viewport rather than exposing
 		// a ScrollView layout node. Reserve one column for a visible scroll rail.
 		const contentWidth = Math.max(1, width - 1);
 		const body = [...this.transcriptLines(contentWidth), ...this.streamingLines(contentWidth)];
-		this.contentHeight = body.length;
 		const maxScroll = Math.max(0, body.length - this.viewport);
 		this.scroll = Math.min(this.scroll, maxScroll);
 		const end = body.length - this.scroll;
@@ -258,10 +278,12 @@ export class AgentView implements Component, Focusable {
 			this.dragGrabOffset = undefined;
 			this.scrollbarHovered = false;
 		}
-		const footer = [this.renderFooter(width)];
+		const controls = this.renderControls(width);
 
 		// Pad every line to the full width: the overlay must cover the main view.
-		return [...header, ...visible, ...editorLines, ...footer].map((line) => truncateToWidth(line, width, "", true));
+		return [...header, ...visible, ...editorLines, ...footerLines, controls].map((line) =>
+			truncateToWidth(line, width, "", true),
+		);
 	}
 
 	// ── Data ───────────────────────────────────────────────
@@ -287,13 +309,17 @@ export class AgentView implements Component, Focusable {
 
 	private async reload(): Promise<void> {
 		const seq = ++this.reloadSeq;
+		// Both load at once; a footer that cannot load must not cost the conversation.
+		const footer = this.deps.footer?.().catch(() => undefined);
 		let messages: unknown[] = [];
 		try {
 			messages = await this.deps.loadMessages();
 		} catch (err) {
 			this.notice = `Could not load the conversation: ${err instanceof Error ? err.message : String(err)}`;
 		}
+		const footerData = footer && (await footer);
 		if (seq !== this.reloadSeq) return; // a newer reload superseded this one
+		this.footer.update(footerData);
 		this.transcript = buildTranscript(messages, {
 			tui: this.tui,
 			cwd: this.deps.entry()?.cwd ?? this.deps.cwd,
@@ -350,6 +376,10 @@ export class AgentView implements Component, Focusable {
 			case "agent_end":
 				this.scheduleReload();
 				return;
+			case "extension_ui_request":
+				// One of its extensions changed its footer status (read at render time).
+				if (event.method === "setStatus") this.tui.requestRender();
+				return;
 		}
 	}
 
@@ -380,6 +410,28 @@ export class AgentView implements Component, Focusable {
 				: "";
 		this.scroll = 0;
 		this.attach();
+		this.tui.requestRender();
+	}
+
+	/** Ctrl+X arms, a second Ctrl+X stops: a stray key must not kill an agent's work. */
+	private async requestStop(): Promise<void> {
+		if (!this.deps.stop || !this.deps.canStop?.()) {
+			this.stopArmed = false;
+			this.notice = "Not running \u2014 nothing to stop";
+			this.tui.requestRender();
+			return;
+		}
+		if (!this.stopArmed) {
+			this.stopArmed = true;
+			this.notice = `Press Ctrl+X again to stop ${atId(this.deps.agentId)}`;
+			this.tui.requestRender();
+			return;
+		}
+		this.stopArmed = false;
+		this.notice = "Stopping\u2026";
+		this.tui.requestRender();
+		const error = await this.deps.stop();
+		this.notice = error ?? "Stopped \u2014 send a message to resume";
 		this.tui.requestRender();
 	}
 
@@ -453,22 +505,14 @@ export class AgentView implements Component, Focusable {
 		return [line1, line2, t.fg("borderMuted", "─".repeat(width))].slice(0, HEADER_LINES);
 	}
 
-	private renderFooter(width: number): string {
+	/** The view's own line: notices and its keys (the scrollbar shows the position). */
+	private renderControls(width: number): string {
 		const t = this.theme;
 		const entry = this.deps.entry();
 		const finished = entry ? isTerminal(entry.status) : true;
 		const hint = finished ? "Finished — send a message to resume · " : "";
-		const keys = "Enter Send · PgUp/PgDn Scroll · Esc Back";
+		const keys = `Enter Send · ${this.deps.canStop?.() ? "Ctrl+X Stop · " : ""}PgUp/PgDn Scroll · Esc Back`;
 		const notice = this.notice ? `${this.notice} · ` : "";
-		const end = this.contentHeight - this.scroll;
-		const position =
-			this.contentHeight > this.viewport
-				? `${Math.max(1, end - this.viewport + 1)}–${end}/${this.contentHeight} · `
-				: "";
-		return truncateToWidth(
-			t.fg("dim", ` ${position}${notice}${hint}${keys} · Replies stay in this conversation`),
-			width,
-			"…",
-		);
+		return truncateToWidth(t.fg("dim", `${notice}${hint}${keys} · Replies stay in this conversation`), width, "…");
 	}
 }

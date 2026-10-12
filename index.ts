@@ -22,6 +22,7 @@
  *   widget.ts         — bottom agent list (one clickable line per agent)
  *   roster.ts         — the conversation's agents, live and finished (rebuilt on resume)
  *   agent-view.ts     — full-screen view of one agent: transcript + side-chat editor
+ *   agent-footer.ts   — that view's footer: pi's FooterComponent fed the child's data
  *   transcript.ts     — child conversation rendered with pi's own components
  *
  * Every sub‑agent is a resident `pi --mode rpc` child with a persisted
@@ -45,7 +46,8 @@ import {
 	type ToolRenderers,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { type AgentCompletion, AgentProcess } from "./agent-process.js";
+import { type AgentFooterData, finishedContextUsage, gitBranch } from "./agent-footer.js";
+import { type AgentCompletion, AgentProcess, type WakeOutcome } from "./agent-process.js";
 import { AgentView } from "./agent-view.js";
 import { registerCompletionInbox } from "./completion-inbox.js";
 import { canSpawnAt, envInt, loadConfig } from "./config.js";
@@ -255,8 +257,8 @@ const SpawnTimeoutField = Type.Optional(
 	Type.Integer({
 		minimum: 1,
 		description:
-			"Optional wall-clock deadline for the whole task, in milliseconds. Omit for no " +
-			"time limit. On expiry the agent is stopped and the call reports stopped.",
+			"Optional wall-clock limit per turn, in milliseconds: the task, and each later turn started by " +
+			"agent_send. Omit for no time limit. On expiry the agent is stopped and the turn reports stopped.",
 	}),
 );
 
@@ -414,6 +416,14 @@ const CHILD_PROMPT_NOTE =
 	"continuing, ask the question and end this reply; your parent's answer will resume this conversation. " +
 	"When finished, return your result directly. Do not send a separate completion report.)";
 
+/** Appended to the output of a turn stopped by timeoutMs. */
+const TIME_LIMIT_NOTE = "(stopped \u2014 reached the task time limit; the output above is partial)";
+
+/** Result of a turn the user stopped from the agent view. */
+const USER_STOP_NOTE =
+	"(stopped by the user from the agent view before it finished; its saved conversation keeps any partial " +
+	"work, and agent_send resumes it)";
+
 /** The tools subagent_enable activates (registered with defaultActive: false). */
 const SUBAGENT_TOOL_NAMES = ["agent_spawn", "agent_stop", "agent_send"] as const;
 const ENABLE_TOOL_NAME = "subagent_enable";
@@ -506,17 +516,24 @@ export default function (pi: ExtensionAPI) {
 	const tree = createTreeTelemetry(HAS_PARENT);
 
 	/** A wake turn ended: deliver its answer to this session, like a completion. */
-	const reportWake = async (agent: AgentProcess, status: "completed" | "failed"): Promise<void> => {
+	const reportWake = async (agent: AgentProcess, status: WakeOutcome): Promise<void> => {
 		const completionId = agent.completionId;
+		const durationMs = Date.now() - agent.turnStartedAt;
 		const [output, stats] = await Promise.all([agent.lastOutput(), agent.getStats()]);
 		notifyCompletion(agent, {
 			completionId,
 			status,
-			output: output || (status === "failed" ? "Follow-up turn failed (model API error)." : output),
+			output:
+				status === "failed"
+					? output || agent.errorText || "Follow-up turn failed."
+					: status === "stopped"
+						? `${output || "Sub-agent was stopped."}\n${TIME_LIMIT_NOTE}`
+						: output,
 			stats: {
 				tokens: stats?.tokens ?? 0,
 				toolUses: stats?.toolUses ?? 0,
-				durationMs: Date.now() - agent.startedAt,
+				// This turn's time, not the agent's lifetime.
+				durationMs,
 			},
 			sessionPath: agent.sessionPath,
 			sessionId: agent.sessionId,
@@ -673,9 +690,6 @@ export default function (pi: ExtensionAPI) {
 			// Short human-name id (max, zoe…) — the LLM-facing reference. No tree
 			// structure: agents address only ids they were given, hop by hop.
 			const agentId = registry.nextAgentId();
-			// Wake-turn ending → completion notification. The assembly is
-			// identical for both endings except status/output-default.
-			const notifyWake = (status: "completed" | "failed") => reportWake(agent, status);
 			const live = createLiveChannels({
 				// getWidget, not widget: the widget is created on first use, so a
 				// captured reference would be null for every update before that.
@@ -721,22 +735,20 @@ export default function (pi: ExtensionAPI) {
 				// A wake finished. Completed: its output must reach this spawner's
 				// context — symmetric with the first-completion notification, an
 				// agent_send "delivered" alone would leave the answer unread.
-				// Deliberate stops stay silent (stoppedByControl). A failed
-				// follow-up is reported (abnormal end) then cleaned up.
-				// A wake the user started from the agent view is a side chat: its
-				// answer stays in the agent's own session, never reported up.
+				// Deliberate stops stay silent (stoppedByControl). A failed or
+				// timed-out follow-up is reported (abnormal end) then cleaned up.
+				// A wake only the user started from the agent view is a side chat:
+				// its answer stays in the agent's own session, never reported up.
 				onIdle: (outcome) => {
-					const reportUp = agent.wakeOrigin === "parent";
+					const reportUp = agent.parentIsWaiting && !agent.stoppedByControl;
 					if (outcome === "completed") {
-						if (!agent.stoppedByControl && reportUp) {
-							void notifyWake("completed").catch(() => {}); // best-effort: must not crash the host
-						}
+						if (reportUp) void reportWake(agent, "completed").catch(() => {}); // best-effort: must not crash the host
 						registry.markIdle(agentId);
 						return;
 					}
-					void (reportUp ? notifyWake("failed") : Promise.resolve())
-						.then(() => tree.remove(agentId, "failed"))
-						.then(() => registry.stopAndRemove(agentId))
+					void (reportUp ? reportWake(agent, outcome) : Promise.resolve())
+						.then(() => tree.remove(agentId, outcome))
+						.then(() => registry.stopAndRemove(agentId, outcome))
 						.catch(() => {}); // best-effort: a cleanup failure must not crash the host
 				},
 				// Where live output goes lives in live-output.ts: the widget row and
@@ -760,6 +772,7 @@ export default function (pi: ExtensionAPI) {
 				status: "running",
 				model: agent.model,
 				tools: params.tools,
+				timeoutMs: params.timeoutMs,
 				cwd: ctx.cwd,
 				indent: 0,
 			});
@@ -915,9 +928,11 @@ export default function (pi: ExtensionAPI) {
 						const message =
 							outcome.status === "failed"
 								? outcome.output || "Sub-agent failed."
-								: outcome.stoppedByControl
-									? outcome.output || "Sub-agent stopped."
-									: `${outcome.output || "Sub-agent was stopped."}\n(stopped \u2014 reached the task time limit; the output above is partial)`;
+								: agent.stoppedByUser
+									? `${outcome.output ? `${outcome.output}\n` : ""}${USER_STOP_NOTE}`
+									: outcome.stoppedByControl
+										? outcome.output || "Sub-agent stopped."
+										: `${outcome.output || "Sub-agent was stopped."}\n${TIME_LIMIT_NOTE}`;
 						return {
 							content: [{ type: "text", text: truncateForContext(message) }],
 							details: {
@@ -1145,6 +1160,51 @@ export default function (pi: ExtensionAPI) {
 		return renderers;
 	});
 
+	/** The main session's model registry: the view footer resolves a finished
+	 *  child's model and counts providers with it. Refreshed on session events. */
+	let modelRegistry: ExtensionContext["modelRegistry"] | undefined;
+	const NO_STATUSES: ReadonlyMap<string, string> = new Map();
+
+	/**
+	 * What the agent view's footer shows: pi's footer lines for the child.
+	 * Usage totals come from its session file; model, thinking and context
+	 * usage from the live process, else from what the session recorded.
+	 */
+	const loadFooter = async (agentId: string, branch: Promise<string | null>): Promise<AgentFooterData | undefined> => {
+		const live = processes.get(agentId);
+		const alive = live?.isAlive ? live : undefined;
+		const sessionPath = alive?.sessionPath ?? roster.get(agentId)?.sessionPath;
+		if (!sessionPath) return undefined;
+		const sessionManager = SessionManager.open(sessionPath);
+		const [state, liveContext, gitBranchName] = await Promise.all([
+			alive?.getState(),
+			alive?.getContextUsage(),
+			branch,
+		]);
+		let model = state?.model;
+		let thinkingLevel = state?.thinkingLevel;
+		if (!model || !thinkingLevel) {
+			const recorded = buildSessionContext(sessionManager.getBranch());
+			if (!model && recorded.model) model = modelRegistry?.find(recorded.model.provider, recorded.model.modelId);
+			thinkingLevel ??= recorded.thinkingLevel;
+		}
+		const registry = modelRegistry;
+		return {
+			sessionManager,
+			model,
+			thinkingLevel,
+			contextUsage: liveContext ?? (alive ? undefined : finishedContextUsage(sessionManager, model)),
+			autoCompactionEnabled: state?.autoCompactionEnabled ?? true,
+			gitBranch: gitBranchName,
+			providerCount: registry ? new Set(registry.getAvailable().map((m) => m.provider)).size : 1,
+			isUsingSubscription: (provider) => !!model && model.provider === provider && !!registry?.isUsingOAuth(model),
+			statuses: () => {
+				const current = processes.get(agentId);
+				return current?.isAlive ? current.getStatuses() : NO_STATUSES;
+			},
+		};
+	};
+
 	/** The conversation so far: the live child's, else its session file's. */
 	const loadMessages = async (agentId: string): Promise<unknown[]> => {
 		const live = processes.get(agentId);
@@ -1185,20 +1245,21 @@ export default function (pi: ExtensionAPI) {
 			label: entry.label,
 			cwd: entry.cwd ?? cwd,
 			tools: entry.tools,
+			timeoutMs: entry.timeoutMs,
 			persistent: true,
 			resumeSession: entry.sessionPath,
 			env: childEnv(agentId),
 			onMessage: onChildMessage,
 			onTreeEvent: (event) => subtree.onTreeEvent(event),
 			onIdle: (outcome) => {
-				const reportUp = agent.wakeOrigin === "parent" && !agent.stoppedByControl;
+				const reportUp = agent.parentIsWaiting && !agent.stoppedByControl;
 				if (outcome === "completed") {
 					if (reportUp) void reportWake(agent, "completed").catch(() => {});
 					registry.markIdle(agentId);
 					return;
 				}
-				void (reportUp ? reportWake(agent, "failed") : Promise.resolve())
-					.then(() => registry.stopAndRemove(agentId))
+				void (reportUp ? reportWake(agent, outcome) : Promise.resolve())
+					.then(() => registry.stopAndRemove(agentId, outcome))
 					.catch(() => {});
 			},
 			onDelta: (delta) => live.onDelta(agent, delta),
@@ -1207,10 +1268,9 @@ export default function (pi: ExtensionAPI) {
 				if (processes.get(agentId) === agent) processes.delete(agentId);
 			},
 		});
-		agent.wakeOrigin = origin;
 		bindCompletion(agent);
 		processes.set(agentId, agent);
-		const started = await agent.spawnAndSend(text);
+		const started = await agent.spawnAndSend(text, origin);
 		if (!started.ok) {
 			processes.delete(agentId);
 			await agent.stop().catch(() => {});
@@ -1221,10 +1281,10 @@ export default function (pi: ExtensionAPI) {
 		void agent
 			.waitForCompletion()
 			.then(async (completion) => {
-				// Parent-started: the completion policy notifies and keeps it resident.
-				if (agent.wakeOrigin === "parent") await registry.complete(agent, completion);
+				// The parent waited on it: the completion policy notifies and keeps it resident.
+				if (completion.owedToParent) await registry.complete(agent, completion);
 				else if (completion.status === "completed") registry.markIdle(agentId);
-				else await registry.stopAndRemove(agentId);
+				else await registry.stopAndRemove(agentId, completion.status === "failed" ? "failed" : "stopped");
 			})
 			.catch(() => {});
 		return undefined;
@@ -1247,12 +1307,47 @@ export default function (pi: ExtensionAPI) {
 		return undefined;
 	};
 
+	/**
+	 * The user stopped an agent from its view. Like agent_stop it ends the
+	 * process and keeps the saved session (agent_send resumes it). Unlike
+	 * agent_stop the parent did not ask for it, so a parent still waiting on
+	 * the turn is told; an idle agent owes nothing and stops silently.
+	 */
+	const stopFromView = async (agentId: string): Promise<string | undefined> => {
+		const agent = processes.get(agentId);
+		if (!agent?.isAlive) return "Not running.";
+		agent.stoppedByUser = true;
+		if (!registry.lookup(agentId)) {
+			// Foreground: its agent_spawn call is waiting and returns the stop.
+			await agent.stop();
+			return undefined;
+		}
+		const owed = agent.status === "running" && agent.parentIsWaiting;
+		const completionId = agent.completionId;
+		const durationMs = Date.now() - agent.turnStartedAt;
+		await registry.stopAndRemove(agentId);
+		tree.remove(agentId, "stopped");
+		if (owed) {
+			notifyCompletion(agent, {
+				completionId,
+				status: "stopped",
+				output: USER_STOP_NOTE,
+				stats: { tokens: 0, toolUses: 0, durationMs },
+				sessionPath: agent.sessionPath,
+				sessionId: agent.sessionId,
+			});
+		}
+		return undefined;
+	};
+
 	let viewOpen = false;
 	openAgent = (agentId: string) => {
 		const ui = viewUi;
 		if (!ui || viewOpen || !roster.get(agentId)) return;
 		viewOpen = true;
 		const cwd = roster.get(agentId)?.cwd ?? process.cwd();
+		// Once per view: the branch rarely changes while it is open.
+		const branch = gitBranch(cwd);
 		void ui
 			.custom<void>(
 				(tui, theme, keybindings, done) =>
@@ -1268,6 +1363,9 @@ export default function (pi: ExtensionAPI) {
 							processKey: () => processes.get(agentId),
 							loadMessages: () => loadMessages(agentId),
 							send: (text) => sendFromView(agentId, text, cwd),
+							canStop: () => processes.get(agentId)?.isAlive === true,
+							footer: () => loadFooter(agentId, branch),
+							stop: () => stopFromView(agentId),
 							onRosterChange: (listener) => roster.onChange(listener),
 							renderers: (toolName) => rendererCache.get(toolName) ?? fallbackRenderers(toolName),
 						},
@@ -1288,6 +1386,7 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			viewUi = ctx.ui;
+			modelRegistry = ctx.modelRegistry;
 			ensureWidget(ctx);
 			const entries = roster.list();
 			if (entries.length === 0) {
@@ -1365,29 +1464,35 @@ export default function (pi: ExtensionAPI) {
 		);
 	};
 	pi.on("session_start", (_event, ctx) => {
+		modelRegistry = ctx.modelRegistry;
 		restoreAgentTools(ctx);
 		rebuildRoster(ctx);
 		if (ctx.mode === "tui") for (const warning of configWarnings) ctx.ui.notify(`pi-subagents: ${warning}`, "warning");
 	});
 	pi.on("session_tree", (_event, ctx) => {
+		modelRegistry = ctx.modelRegistry;
 		restoreAgentTools(ctx);
 		rebuildRoster(ctx);
 	});
 
-	pi.on("session_shutdown", async (event) => {
+	pi.on("session_shutdown", async () => {
 		unsubscribePersistence?.();
 		unsubscribePersistence = undefined;
-		// Quit: the whole process is ending. Reload: pi rebuilds the extension
-		// runtime in the same process — emitSessionShutdownEvent(reason:"reload")
-		// fires on the OLD runner before it is invalidated, so this handler still
-		// owns the registry and can stop its sub-agents cleanly; otherwise a
-		// /reload would leave resident rpc children whose stdin pipe stays open.
-		if (event.reason !== "quit" && event.reason !== "reload") return;
+		// Every reason ends this runtime's ownership of its children. Quit: the
+		// process is ending. Reload and session replacement (new / resume /
+		// fork): pi builds a new extension runtime in the same process and
+		// fires this on the OLD one first, so this handler still owns the
+		// registry. The inbox closes with the session, so a child left running
+		// could never deliver again — and residency is scoped to the host
+		// session (SPEC). Saved sessions stay; agent_send can resume them.
 
-		// Graceful stop of every tracked agent. Children exit on their own
-		// (stdin EOF → rpc shutdown) even if the parent dies first, because
-		// the pipe closes — no tmux, no disk cleanup, no signals.
+		// Graceful stop of every agent, registered or not (a foreground child
+		// whose tool call is still open). Children exit on their own (stdin
+		// EOF → rpc shutdown) even if the parent dies first, because the pipe
+		// closes — no tmux, no disk cleanup, no signals.
+		const live = [...processes.values()];
 		await registry.shutdown();
+		for (const agent of live) void agent.stop().catch(() => {});
 		processes.clear();
 		widget?.dispose();
 		widget = null;

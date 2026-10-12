@@ -169,7 +169,7 @@ queued → running ──→ completed (notify)
 - Idle means a resident RPC process without an active model turn. Notifications and widget rows identify it as idle; it remains addressable until stopped or host exit.
 - Stop closes stdin for orderly shutdown and marks `stoppedByControl` to suppress a new completion notification.
 - Failures and limit stops produce error tool results, consistent with bash exit/cancellation reporting.
-- Reload dispatches `session_shutdown(reason="reload")` to the old extension runtime before replacing it. The registry closes this runtime's children. Host crashes also close their stdin. Cleanup is process-local, so multiple Pi instances do not share lifecycle state.
+- Reload and session replacement (`/new`, `/resume`, `/fork`) dispatch `session_shutdown` to the old extension runtime before replacing it. The registry closes this runtime's children for every reason: the old session's inbox is closed, so a surviving child could never deliver again. Host crashes also close their stdin. Cleanup is process-local, so multiple Pi instances do not share lifecycle state.
 
 ### Message model
 
@@ -222,10 +222,12 @@ automatic result: batched turn_end / agent_before_settle entries;
 - Card-only rendering information stays in `details`, outside model context.
 - Spawn failure already returns an error tool result and therefore does not also emit a completion notification.
 - Persistent follow-up turns return through `onIdle → completionNotification → inbox`, just like the initial turn. Otherwise `agent_send` would report delivery without returning the answer. Deliberate stops remain silent; failed follow-ups report failure.
+- A turn's answer goes to the parent when the parent started that turn or messaged during it. A user side-chat message from the agent view in the same turn does not cancel this; a turn only the user started stays in the child's session.
+- The user can stop a live child from its agent view (Ctrl+X twice). Unlike `agent_stop`, the parent did not ask for this, so a parent still waiting on the turn receives a `stopped` completion; an idle child stops silently.
 
 ### Graceful limits
 
-- No default deadline. The optional `timeoutMs` is the only elapsed-task limit.
+- No default deadline. The optional `timeoutMs` is the only elapsed-time limit. It bounds each turn: the first one and every wake of a resident agent. A timed-out wake reports `stopped` and the agent closes; `agent_send` resumes it from its session.
 - No token limit. `get_session_stats` supplies display-only usage information.
 
 ### Session storage
@@ -272,7 +274,7 @@ Persistent residency means the process remains available after a completed turn,
 - Predefined agent types: callers define the agent through parameters.
 - Scheduling.
 - Worktree isolation.
-- A separate fleet-management framework; the native agent view and saved-session attach provide inspection.
+- A separate fleet-management framework; the native agent view and saved-session attach provide inspection. The view's footer reuses pi's `FooterComponent` with the child's data (session-file usage totals, live rpc model/thinking/context, and the child's own extension statuses), so it matches the main footer; the view's key line comes last.
 - Concurrency limits or a worker queue: each background child is a process.
 - Result polling/query tools: completion is pushed once.
 - Windows support: process and pipe lifecycle assumes POSIX.

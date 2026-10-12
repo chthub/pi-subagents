@@ -29,6 +29,8 @@ export interface RpcClientOptions {
 	env?: NodeJS.ProcessEnv;
 	/** Test seam: executable to spawn (default "pi"). When set, `args` are used verbatim (no --mode rpc). */
 	command?: string;
+	/** Test seam: the unterminated-line cap (default MAX_LINE_BUFFER). */
+	maxLineLength?: number;
 	onEvent?: (event: RpcEvent) => void;
 	/** Called once when the child exits (any reason). */
 	onExit?: () => void;
@@ -39,10 +41,12 @@ const RESPONSE_TIMEOUT_MS = 10_000;
 
 /**
  * Single-line output cap: a pathological (or buggy) child spewing one huge
- * line would otherwise grow `buffer` without bound. Lines past this are
- * dropped at the line boundary; individual real lines are far smaller.
+ * line would otherwise grow `buffer` without bound. Real lines are large:
+ * agent_end carries every message of the run (file reads, tool output), and
+ * multi-MB runs are common — so the cap only guards against runaway output.
+ * A line past it is skipped up to its newline; the lines after it survive.
  */
-const MAX_LINE_BUFFER = 1024 * 1024;
+const MAX_LINE_BUFFER = 64 * 1024 * 1024;
 
 /** Stderr capture cap — only used for error messages on exit. */
 const MAX_STDERR = 64 * 1024;
@@ -60,6 +64,8 @@ export class RpcClient {
 	private readonly decoder = new StringDecoder("utf8");
 	private seq = 0;
 	private buffer = "";
+	/** Skipping the rest of an over-cap line until its newline. */
+	private discarding = false;
 	private stderr = "";
 	private closed = false;
 	private exitPromise: Promise<{ code: number | null; signal: string | null }>;
@@ -185,18 +191,24 @@ export class RpcClient {
 	// ── stdout line framing (strict LF, mirrors pi's jsonl.js) ──
 
 	private onData(chunk: Buffer): void {
-		this.buffer += this.decoder.write(chunk);
-		if (this.buffer.length > MAX_LINE_BUFFER) {
-			// A single unterminated line exceeded the cap — drop it rather than
-			// grow without bound (the framing is still recovered at the next \n).
+		// Only the new text is scanned for newlines — rescanning the whole
+		// buffer per chunk would be quadratic on a multi-MB line.
+		const text = this.decoder.write(chunk);
+		let start = 0;
+		for (let idx = text.indexOf("\n"); idx !== -1; idx = text.indexOf("\n", start)) {
+			const line = this.buffer + text.slice(start, idx);
+			start = idx + 1;
 			this.buffer = "";
+			if (this.discarding) this.discarding = false;
+			else this.handleLine(line);
 		}
-		for (;;) {
-			const idx = this.buffer.indexOf("\n");
-			if (idx === -1) break;
-			const line = this.buffer.slice(0, idx);
-			this.buffer = this.buffer.slice(idx + 1);
-			this.handleLine(line);
+		if (this.discarding) return;
+		this.buffer += text.slice(start);
+		// The cap applies to the unterminated tail only, never to lines that
+		// already ended in this chunk (dropping those lost agent_settled).
+		if (this.buffer.length > (this.options.maxLineLength ?? MAX_LINE_BUFFER)) {
+			this.buffer = "";
+			this.discarding = true;
 		}
 	}
 

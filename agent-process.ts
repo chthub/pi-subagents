@@ -11,12 +11,15 @@
  *   waitForCompletion()  → terminal (completed / failed / stopped)
  *   stop()               → graceful stdin EOF, SIGTERM fallback
  *
- * Token limits: none. A timeoutMs (if set) triggers a hard abort → graceful
- *   settle within the grace window → hard-stop if it never settles. Otherwise
- *   the child runs until it finishes or is stopped via agent_stop.
+ * Token limits: none. A timeoutMs (if set) bounds every turn — the first one
+ *   and each wake of a resident agent: on expiry, abort → graceful settle
+ *   within the grace window → hard-stop if it never settles. Otherwise the
+ *   child runs until it finishes or is stopped via agent_stop.
  */
 
 import { randomUUID } from "node:crypto";
+import type { Api, Model } from "@earendil-works/pi-ai";
+import type { ContextUsage } from "@earendil-works/pi-coding-agent";
 import type { AgentTreeEvent } from "./event-interpret.js";
 import { type AgentActivity, interpretEvent } from "./event-interpret.js";
 import type { AgentMessage, RpcCommand, RpcEvent } from "./protocol.js";
@@ -26,6 +29,16 @@ import type { RenderEvent } from "./types.js";
 type AgentStatus = "queued" | "running" | "completed" | "failed" | "stopped";
 
 type TerminalStatus = Exclude<AgentStatus, "queued" | "running">;
+
+/** How a woken turn of a resident agent ended. */
+export type WakeOutcome = "completed" | "failed" | "stopped";
+
+/** The slice of rpc get_state the agent view's footer reads. */
+export interface ChildState {
+	model?: Model<Api>;
+	thinkingLevel?: string;
+	autoCompactionEnabled?: boolean;
+}
 
 interface AgentStats {
 	tokens: number;
@@ -41,6 +54,8 @@ export interface AgentCompletion {
 	stats: AgentStats;
 	sessionPath?: string;
 	sessionId?: string;
+	/** The parent was waiting for this turn's answer (see AgentProcess.parentIsWaiting). */
+	owedToParent?: boolean;
 }
 
 export interface AgentProcessOptions {
@@ -57,9 +72,9 @@ export interface AgentProcessOptions {
 	agentId: string;
 	/** Custom session storage dir (--session-dir) — keeps sub-agent sessions out of `pi -r`. */
 	sessionDir?: string;
-	/** Total wall-clock timeout for the whole task (incl. multi-turn).
-	 *  Omitted = no limit (the default): the child runs until it finishes
-	 *  or is stopped — there is no token limit (SPEC: no token limit). */
+	/** Wall-clock limit for each turn: the first one, and every wake of a
+	 *  resident agent. Omitted = no limit (the default): the child runs until
+	 *  it finishes or is stopped — there is no token limit (SPEC: no token limit). */
 	timeoutMs?: number;
 	/** After an abort, how long to wait for the child to settle before hard-stopping it. */
 	abortSettleGraceMs?: number;
@@ -71,8 +86,9 @@ export interface AgentProcessOptions {
 	onMessage?: (message: AgentMessage) => void;
 	/** Tree telemetry from this child's own spawns (extension_ui_request, tree key) — forward or apply. */
 	onTreeEvent?: (event: AgentTreeEvent) => void;
-	/** A woken persistent agent settled: "completed" → idle, "failed" → report + clean up. */
-	onIdle?: (outcome: "completed" | "failed") => void;
+	/** A woken persistent agent's turn ended: "completed" → idle; "failed"
+	 *  (model error or crash) and "stopped" (timeoutMs) → report + clean up. */
+	onIdle?: (outcome: WakeOutcome) => void;
 	/** Resident after completion (idle, zero token) — explicit opt-in, default off. */
 	persistent?: boolean;
 	/** Extra child environment (identity injection: PI_SUBAGENT_AGENT_ID / PI_SUBAGENT_PARENT). */
@@ -108,6 +124,11 @@ export class AgentProcess {
 
 	/** True when stop() was called via agent_stop (deliberate user action → no notification). */
 	stoppedByControl = false;
+	/** The user stopped it from the agent view (not the parent's agent_stop). */
+	stoppedByUser = false;
+
+	/** When the current turn started: the spawn, or the wake that resumed it. */
+	turnStartedAt = this.startedAt;
 
 	private readonly client: RpcClient;
 	private readonly timeoutMs: number | undefined;
@@ -137,9 +158,17 @@ export class AgentProcess {
 	sessionPath?: string;
 	sessionId?: string;
 
-	/** Who started the current wake turn: the parent's agent_send, or the user
-	 *  typing in the agent view (a side chat — its answer is not reported up). */
-	wakeOrigin: "parent" | "user" = "parent";
+	/** The parent is waiting for the current turn's answer: it started the
+	 *  turn (spawn, agent_send) or messaged during it. A user side-chat message
+	 *  in the same turn never cancels that; a turn only the user started (a
+	 *  side chat from the agent view) is not reported up. */
+	private parentWaiting = false;
+	/** Pending wake-turn limit: the timeoutMs clock, then the abort grace. */
+	private wakeTimer: NodeJS.Timeout | undefined;
+	private wakeTimedOut = false;
+
+	/** The child's own extension statuses (its footer line), by key. */
+	private readonly statuses = new Map<string, string>();
 
 	/** Raw rpc event listeners (the agent view renders the live transcript). */
 	private readonly listeners = new Set<(event: RpcEvent) => void>();
@@ -181,6 +210,10 @@ export class AgentProcess {
 				for (const listener of this.listeners) listener(event);
 			},
 			onExit: () => {
+				this.clearWakeClock();
+				// Died in the middle of a woken turn (a crash — deliberate stops
+				// mark the status first): the turn failed and must be reported.
+				if (this.done && this.persistent && this.status === "running") this.finishWake("failed");
 				// Process died (any reason): release everyone waiting on settle.
 				this.settle();
 				this.done = true;
@@ -192,8 +225,13 @@ export class AgentProcess {
 
 	// ── Public API ─────────────────────────────────────────
 
-	/** Spawn + send the prompt; resolves once the prompt preflight succeeded. */
-	async spawnAndSend(prompt: string): Promise<{ ok: true } | { ok: false; error: string }> {
+	/** Spawn + send the prompt; resolves once the prompt preflight succeeded.
+	 *  `origin` "user" is a side chat from the agent view (a revive): its
+	 *  answer stays in the agent's session. */
+	async spawnAndSend(
+		prompt: string,
+		origin: "parent" | "user" = "parent",
+	): Promise<{ ok: true } | { ok: false; error: string }> {
 		const response = await this.client.sendCommand({ type: "prompt", message: prompt }).catch((err: Error) => ({
 			type: "response" as const,
 			command: "prompt",
@@ -214,6 +252,7 @@ export class AgentProcess {
 		}
 
 		this.status = "running";
+		this.parentWaiting = origin === "parent";
 		return { ok: true };
 	}
 
@@ -227,10 +266,9 @@ export class AgentProcess {
 	 * with streamingBehavior "steer" — idle starts a new turn (wake), a
 	 * running child queues it (delivered after the turn). Resolves whether
 	 * the prompt preflight accepted the message. Waking an idle persistent
-	 * agent flips it back to running.
+	 * agent flips it back to running and starts a new turn.
 	 */
 	async sendMessage(text: string, origin: "parent" | "user" = "parent"): Promise<boolean> {
-		this.wakeOrigin = origin;
 		const response = await this.client
 			.sendCommand({ type: "prompt", message: text, streamingBehavior: "steer" })
 			.catch((err: Error) => ({
@@ -240,9 +278,27 @@ export class AgentProcess {
 				error: err.message,
 			}));
 		if (!response.success) return false;
-		// Woke an idle persistent agent — activity resumes.
-		if (this.status === "completed") this.status = "running";
+		// Ownership is recorded only once the child accepted the message: the
+		// accepted prompt is what starts (or joins) the turn it belongs to.
+		if (this.status === "completed") {
+			// Woke an idle persistent agent — a new turn starts.
+			this.status = "running";
+			this.parentWaiting = origin === "parent";
+			this.startWakeClock();
+		} else if (origin === "parent") {
+			this.parentWaiting = true;
+		}
 		return true;
+	}
+
+	/** Whether the parent is waiting for the current (or just-settled) turn's answer. */
+	get parentIsWaiting(): boolean {
+		return this.parentWaiting;
+	}
+
+	/** Why the last turn failed: the model error, else the child's stderr. */
+	get errorText(): string {
+		return this.agentError ?? this.client.stderrText.trim();
 	}
 
 	/** Subscribe to the child's raw rpc events. Returns the unsubscribe function. */
@@ -260,6 +316,22 @@ export class AgentProcess {
 	/** Whether the child process is still up (running or resident idle). */
 	get isAlive(): boolean {
 		return !this.client.isClosed;
+	}
+
+	/** The child's extension statuses, as its own footer would show them. */
+	getStatuses(): ReadonlyMap<string, string> {
+		return this.statuses;
+	}
+
+	/** The child's session state (rpc get_state): model, thinking level, compaction. */
+	async getState(): Promise<ChildState | null> {
+		return this.sendData<ChildState>({ type: "get_state" });
+	}
+
+	/** The child's context-window usage (rpc get_session_stats). */
+	async getContextUsage(): Promise<ContextUsage | undefined> {
+		const data = await this.sendData<{ contextUsage?: ContextUsage }>({ type: "get_session_stats" });
+		return data?.contextUsage;
 	}
 
 	/** Current final assistant text (rpc get_last_assistant_text). */
@@ -332,6 +404,8 @@ export class AgentProcess {
 		// lives in the model error (agentError) or the stderr the RpcClient
 		// captured before exit — surface it instead of a blank "Sub-agent failed."
 		const completionId = this.completionId;
+		// Read before awaiting: a wake starting meanwhile would reset it.
+		const owedToParent = this.parentWaiting;
 		const output = await this.lastOutput();
 		const finalOutput =
 			this.agentError && !output.trim()
@@ -351,6 +425,7 @@ export class AgentProcess {
 			},
 			sessionPath: this.sessionPath,
 			sessionId: this.sessionId,
+			owedToParent,
 		};
 	}
 
@@ -360,8 +435,14 @@ export class AgentProcess {
 	 * user-controlled (agent_stop / cancel) — suppresses notifications.
 	 */
 	async stop(): Promise<void> {
+		this.clearWakeClock();
 		if (this.done) {
-			// Already terminal — just ensure the child is gone.
+			// A resident agent. Stopping it mid-wake is a deliberate stop of
+			// that turn; idle, it just ends the process.
+			if (this.status === "running") {
+				this.stoppedByControl = true;
+				this.status = "stopped";
+			}
 			this.client.endInput();
 			return;
 		}
@@ -400,7 +481,7 @@ export class AgentProcess {
 	private readonly onActivityChange: ((activity: AgentActivity) => void) | undefined;
 	private readonly onMessage: ((message: AgentMessage) => void) | undefined;
 	private readonly onTreeEvent: ((event: AgentTreeEvent) => void) | undefined;
-	private readonly onIdle: ((outcome: "completed" | "failed") => void) | undefined;
+	private readonly onIdle: ((outcome: WakeOutcome) => void) | undefined;
 
 	private onEvent(event: RpcEvent): void {
 		// Raw protocol shapes are interpreted in event-interpret.ts — the only
@@ -414,11 +495,11 @@ export class AgentProcess {
 				case "settled":
 					this.settle();
 					// Persistent agent woke by sendMessage finished its follow-up
-					// turn — completed goes back to idle; a model error is reported
-					// honestly (never disguised as idle).
+					// turn — completed goes back to idle; a model error or the
+					// turn limit is reported honestly (never disguised as idle).
 					if (this.done && this.persistent && this.status === "running") {
-						this.status = this.agentError ? "failed" : "completed";
-						this.onIdle?.(this.agentError ? "failed" : "completed");
+						this.clearWakeClock();
+						this.finishWake(this.agentError ? "failed" : this.wakeTimedOut ? "stopped" : "completed");
 					}
 					break;
 				case "thinking":
@@ -463,8 +544,50 @@ export class AgentProcess {
 				case "agent_tree":
 					this.onTreeEvent?.(ev.event);
 					break;
+				case "status":
+					if (ev.text === undefined) this.statuses.delete(ev.key);
+					else this.statuses.set(ev.key, ev.text);
+					break;
 			}
 		}
+	}
+
+	private finishWake(outcome: WakeOutcome): void {
+		this.status = outcome;
+		this.onIdle?.(outcome);
+	}
+
+	/** A wake starts a new turn: restart the turn clock and its timeoutMs limit. */
+	private startWakeClock(): void {
+		this.clearWakeClock();
+		this.turnStartedAt = Date.now();
+		this.wakeTimedOut = false;
+		if (this.timeoutMs !== undefined) this.wakeTimer = setTimeout(() => void this.expireWake(), this.timeoutMs);
+	}
+
+	private clearWakeClock(): void {
+		if (this.wakeTimer) clearTimeout(this.wakeTimer);
+		this.wakeTimer = undefined;
+	}
+
+	/**
+	 * A woken turn hit timeoutMs — the same escalation as the first turn:
+	 * abort, and hard-stop if no settle arrives within the grace window. The
+	 * settle (or the hard stop) reports the turn as stopped through onIdle.
+	 */
+	private async expireWake(): Promise<void> {
+		this.wakeTimer = undefined;
+		if (this.status !== "running") return;
+		this.wakeTimedOut = true;
+		await this.abort();
+		if (this.status !== "running") return; // settled during the abort
+		this.wakeTimer = setTimeout(() => {
+			this.wakeTimer = undefined;
+			if (this.status !== "running") return;
+			// Not a user-controlled stop: the turn is reported as stopped.
+			this.finishWake("stopped");
+			void this.hardStop();
+		}, this.abortSettleGraceMs);
 	}
 
 	private settle(): void {

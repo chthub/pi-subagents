@@ -41,7 +41,9 @@ export type AgentEvent =
 	| { type: "text_delta"; delta: string }
 	| { type: "agent_failed"; error: string }
 	| { type: "agent_msg"; message: AgentMessage }
-	| { type: "agent_tree"; event: AgentTreeEvent };
+	| { type: "agent_tree"; event: AgentTreeEvent }
+	/** One of the child's own extension statuses (ctx.ui.setStatus); no text = cleared. */
+	| { type: "status"; key: string; text?: string };
 
 /** Status key that carries agent_send messages over extension_ui_request. */
 export const MSG_STATUS_KEY = "pi-subagent-msg";
@@ -143,7 +145,20 @@ export function interpretEvent(raw: RpcEvent): AgentEvent[] {
 		// In-tree channels: the sender's extension emits a setStatus carrying a
 		// JSON payload under one of our reserved keys (rpc-mode forwards
 		// extension_ui_request verbatim, no throttling). Anything else in the
-		// extension_ui_request namespace is not ours — ignore.
+		// extension_ui_request namespace is not ours — ignore, except the
+		// child's own footer statuses, which the agent view shows like pi does.
+		if (
+			raw.method === "setStatus" &&
+			typeof raw.statusKey === "string" &&
+			raw.statusKey !== MSG_STATUS_KEY &&
+			raw.statusKey !== TREE_STATUS_KEY
+		) {
+			return [
+				typeof raw.statusText === "string"
+					? { type: "status", key: raw.statusKey, text: raw.statusText }
+					: { type: "status", key: raw.statusKey },
+			];
+		}
 		if (typeof raw.statusText !== "string") return [];
 		if (raw.method === "setStatus" && raw.statusKey === MSG_STATUS_KEY) {
 			try {

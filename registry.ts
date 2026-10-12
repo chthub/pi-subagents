@@ -161,12 +161,13 @@ export class AgentRegistry {
 	 *  Returns whether an agent was actually stopped (false when it finished
 	 *  between lookup and removal). A rejecting stop() propagates — the
 	 *  caller (agent_stop.execute) surfaces it as a tool error, matching
-	 *  the original wiring. */
-	async stopAndRemove(agentId: string): Promise<boolean> {
+	 *  the original wiring. `result` is the row's end state: a failed
+	 *  follow-up turn is cleaned up here too and must not read "stopped". */
+	async stopAndRemove(agentId: string, result: WidgetResult = "stopped"): Promise<boolean> {
 		const agent = this.agents.get(agentId);
 		if (!agent) return false;
 		await agent.stop();
-		this.remove(agentId, "stopped");
+		this.remove(agentId, result);
 		return true;
 	}
 

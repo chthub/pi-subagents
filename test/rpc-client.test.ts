@@ -15,12 +15,12 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
-import { RpcClient } from "../rpc-client.js";
+import { RpcClient, type RpcClientOptions } from "../rpc-client.js";
 
 const FIXTURE = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "rpc-mock.js");
 
-function makeClient(): RpcClient {
-	return new RpcClient({ command: "node", args: [FIXTURE], cwd: path.dirname(FIXTURE) });
+function makeClient(options: Partial<RpcClientOptions> = {}): RpcClient {
+	return new RpcClient({ command: "node", args: [FIXTURE], cwd: path.dirname(FIXTURE), ...options });
 }
 
 async function close(client: RpcClient): Promise<void> {
@@ -72,5 +72,31 @@ describe("RpcClient — UTF-8 framing", () => {
 		} finally {
 			await close(client);
 		}
+	});
+});
+
+describe("RpcClient — large lines", () => {
+	async function eventsAfterBigLine(size: number, maxLineLength?: number): Promise<string[]> {
+		const events: string[] = [];
+		const client = makeClient({ maxLineLength, onEvent: (event) => events.push(event.type) });
+		try {
+			const response = await client.sendCommand({ type: "big_line", size } as never);
+			assert.equal(response.success, true, "the response after the big line must still correlate");
+		} finally {
+			await close(client);
+		}
+		return events;
+	}
+
+	// Sizes just past the old 1 MiB cap lost agent_settled too (it shared the
+	// chunk that crossed the cap) — a spawn without timeoutMs then never ended.
+	for (const size of [1_049_000, 1_080_000, 3_000_000]) {
+		it(`delivers a ${size}-char agent_end and the events after it`, async () => {
+			assert.deepEqual(await eventsAfterBigLine(size), ["agent_end", "agent_settled"]);
+		});
+	}
+
+	it("skips only the over-cap line, keeping the lines after it in the same chunk", async () => {
+		assert.deepEqual(await eventsAfterBigLine(200_000, 100_000), ["agent_settled"]);
 	});
 });

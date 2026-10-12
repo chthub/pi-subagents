@@ -678,3 +678,137 @@ describe("AgentProcess — stop", () => {
 		assert.equal(completion.status, "stopped");
 	});
 });
+
+/** A persistent agent whose first turn completed (resident, idle). */
+async function idleAgent(options: Partial<AgentProcessOptions> = {}) {
+	const outcomes: string[] = [];
+	const made = makeAgent({ cwd: "/tmp", persistent: true, onIdle: (o) => outcomes.push(o), ...options });
+	await made.agent.spawnAndSend("do it");
+	const done = made.agent.waitForCompletion();
+	made.fake.emitSettled();
+	await done;
+	return { ...made, outcomes };
+}
+
+describe("AgentProcess — who is owed a turn's answer", () => {
+	it("a parent message during a user side chat makes the turn owed to the parent", async () => {
+		const { agent } = await idleAgent();
+		await agent.sendMessage("side question", "user");
+		assert.equal(agent.parentIsWaiting, false, "a user-only wake is a side chat");
+		await agent.sendMessage("[from ] status?", "parent");
+		assert.equal(agent.parentIsWaiting, true);
+	});
+
+	it("a user message during a parent wake does not cancel the owed answer", async () => {
+		const { agent, fake, outcomes } = await idleAgent();
+		await agent.sendMessage("[from ] continue", "parent");
+		await agent.sendMessage("also check X", "user");
+		assert.equal(agent.parentIsWaiting, true);
+		fake.emitSettled();
+		assert.deepEqual(outcomes, ["completed"]);
+		assert.equal(agent.parentIsWaiting, true, "still readable when onIdle runs");
+	});
+
+	it("the next wake starts clean", async () => {
+		const { agent, fake } = await idleAgent();
+		await agent.sendMessage("[from ] continue", "parent");
+		fake.emitSettled();
+		await agent.sendMessage("side question", "user");
+		assert.equal(agent.parentIsWaiting, false);
+	});
+
+	it("a completion records whether the parent started the turn (revive origin)", async () => {
+		const parent = makeAgent({ cwd: "/tmp" });
+		await parent.agent.spawnAndSend("do it");
+		const p = parent.agent.waitForCompletion();
+		parent.fake.emitSettled();
+		assert.equal((await p).owedToParent, true);
+
+		const user = makeAgent({ cwd: "/tmp" });
+		await user.agent.spawnAndSend("side chat", "user");
+		const u = user.agent.waitForCompletion();
+		user.fake.emitSettled();
+		assert.equal((await u).owedToParent, false);
+	});
+});
+
+describe("AgentProcess — wake turns", () => {
+	it("each wake restarts the turn clock", async () => {
+		const { agent } = await idleAgent();
+		const first = agent.turnStartedAt;
+		await new Promise((r) => setTimeout(r, 5));
+		await agent.sendMessage("continue");
+		assert.ok(agent.turnStartedAt > first);
+	});
+
+	it("timeoutMs bounds a wake: abort, then report stopped when it settles", async () => {
+		const { agent, fake, outcomes } = await idleAgent({ timeoutMs: 20, abortSettleGraceMs: 500 });
+		await agent.sendMessage("continue");
+		await new Promise((r) => setTimeout(r, 40));
+		assert.ok(
+			fake.commands.some((c) => c.type === "abort"),
+			"the wake was aborted at its deadline",
+		);
+		fake.emitSettled();
+		assert.deepEqual(outcomes, ["stopped"]);
+		assert.equal(fake.endInputCalls, 0, "a settle inside the grace window avoids the hard stop");
+	});
+
+	it("a wake that never settles after the abort is hard-stopped and reported stopped", async () => {
+		const { agent, fake, outcomes } = await idleAgent({ timeoutMs: 20, abortSettleGraceMs: 20 });
+		await agent.sendMessage("continue");
+		await new Promise((r) => setTimeout(r, 80));
+		assert.deepEqual(outcomes, ["stopped"]);
+		assert.equal(fake.endInputCalls, 1);
+		assert.equal(agent.stoppedByControl, false, "a limit is not a deliberate stop");
+	});
+
+	it("a wake that settles in time is not affected by timeoutMs", async () => {
+		const { agent, fake, outcomes } = await idleAgent({ timeoutMs: 30 });
+		await agent.sendMessage("continue");
+		fake.emitSettled();
+		await new Promise((r) => setTimeout(r, 50));
+		assert.deepEqual(outcomes, ["completed"]);
+		assert.ok(!fake.commands.some((c) => c.type === "abort"));
+	});
+
+	it("a crash in the middle of a wake reports failed", async () => {
+		const { agent, fake, outcomes } = await idleAgent();
+		await agent.sendMessage("continue");
+		fake.stderrText = "segfault";
+		fake.emitExit(1);
+		assert.deepEqual(outcomes, ["failed"]);
+		assert.equal(agent.errorText, "segfault");
+	});
+
+	it("stopping a resident agent mid-wake is a deliberate stop: silent", async () => {
+		const { agent, fake, outcomes } = await idleAgent();
+		await agent.sendMessage("continue");
+		await agent.stop();
+		assert.equal(agent.stoppedByControl, true);
+		assert.equal(agent.status, "stopped");
+		assert.equal(fake.endInputCalls, 1);
+		assert.deepEqual(outcomes, []);
+	});
+
+	it("stopping an idle resident agent ends it without flagging a turn stop", async () => {
+		const { agent, fake, outcomes } = await idleAgent();
+		await agent.stop();
+		assert.equal(agent.stoppedByControl, false);
+		assert.equal(fake.endInputCalls, 1);
+		assert.deepEqual(outcomes, []);
+	});
+});
+
+describe("AgentProcess — the child's footer statuses", () => {
+	it("tracks its extensions' setStatus calls, ignoring the reserved in-tree keys", () => {
+		const { agent, fake } = makeAgent({ cwd: "/tmp" });
+		const status = (statusKey: string, statusText?: string) =>
+			fake.emitEvent({ type: "extension_ui_request", method: "setStatus", statusKey, statusText } as never);
+		status("web", "web: on");
+		status("mcp", "mcp: 2");
+		status("pi-subagent-tree", JSON.stringify({ op: "remove", id: "x", status: "done" }));
+		status("mcp");
+		assert.deepEqual([...agent.getStatuses()], [["web", "web: on"]]);
+	});
+});

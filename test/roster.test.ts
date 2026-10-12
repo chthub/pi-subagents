@@ -19,7 +19,7 @@ describe("rosterFromMessages — the roster a transcript describes", () => {
 	it("rebuilds foreground, background and failed spawns with their call arguments", () => {
 		const entries = rosterFromMessages(
 			[
-				spawnCall("c1", { label: "fg task", tools: ["bash"] }),
+				spawnCall("c1", { label: "fg task", tools: ["bash"], timeoutMs: 60000 }),
 				spawnResult("c1", { agentId: "max", sessionPath: "/s/max.jsonl", startedAt: 10, endedAt: 20 }),
 				spawnCall("c2", { label: "bg task" }),
 				spawnResult("c2", { agentId: "jude", label: "bg task", runInBackground: true, sessionPath: "/s/jude.jsonl" }),
@@ -39,6 +39,7 @@ describe("rosterFromMessages — the roster a transcript describes", () => {
 		assert.deepEqual(Object.keys(byId), ["max", "jude", "kai"], "a spawn without an agent id never existed");
 		assert.equal(byId.max.status, "done");
 		assert.deepEqual(byId.max.tools, ["bash"]);
+		assert.equal(byId.max.timeoutMs, 60000, "a revive keeps the per-turn limit");
 		assert.equal(byId.max.cwd, "/work");
 		assert.equal(byId.jude.status, "done");
 		assert.equal(byId.jude.endedAt, byId.jude.startedAt + 500);

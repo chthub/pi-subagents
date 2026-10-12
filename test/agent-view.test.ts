@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { initTheme } from "@earendil-works/pi-coding-agent";
+import { initTheme, SessionManager } from "@earendil-works/pi-coding-agent";
 import { stripTerminalSequences, type TuiMouseEvent, visibleWidth } from "@earendil-works/pi-tui";
-import { AgentView } from "../agent-view.js";
+import { AgentView, type AgentViewDeps } from "../agent-view.js";
 import type { RpcEvent } from "../protocol.js";
 
 initTheme("dark");
@@ -58,11 +58,15 @@ function rail(view: AgentView, width = 120) {
 		height: rows.length,
 		thumbY: thumb[0]?.y ?? 0,
 		thumbHeight: thumb.length,
-		footer: lines.at(-1) ?? "",
+		/** The visible conversation rows (rail glyph removed): where the view is scrolled to. */
+		content: rows.map(({ text }) => text.slice(0, -1)).join("\n"),
 	};
 }
 
-function setup(loadMessages: () => Promise<unknown[]> = async () => []) {
+function setup(
+	loadMessages: () => Promise<unknown[]> = async () => [],
+	extra: Partial<Pick<AgentViewDeps, "canStop" | "stop" | "footer">> = {},
+) {
 	let listener: ((event: RpcEvent) => void) | undefined;
 	const terminal = { rows: 40 };
 	const view = new AgentView(
@@ -82,6 +86,7 @@ function setup(loadMessages: () => Promise<unknown[]> = async () => []) {
 			},
 			loadMessages,
 			send: async () => undefined,
+			...extra,
 			onRosterChange: () => () => {},
 			renderers: () => undefined,
 		},
@@ -140,16 +145,16 @@ test("thumb capture drags outside the rail, clamps at both ends, and releases", 
 		}),
 	);
 	assert.equal(capture?.capture, true);
-	assert.equal(rail(view).footer, bottom.footer, "grabbing inside the thumb must not jump");
+	assert.equal(rail(view).content, bottom.content, "grabbing inside the thumb must not jump");
 	// Captured events remain component-local even beyond the original bounds.
 	view.handleMouse(mouse("drag", { x: 5, y: -105, screenX: 15, screenY: -100 }));
 	assert.equal(rail(view).thumbY, bottom.y, "dragging above the viewport clamps to the top");
 	view.handleMouse(mouse("drag", { x: 240, y: 195, screenX: 250, screenY: 200 }));
-	assert.equal(rail(view).footer, bottom.footer, "dragging below the viewport returns to the bottom");
+	assert.equal(rail(view).content, bottom.content, "dragging below the viewport returns to the bottom");
 	view.handleMouse(mouse("release", { button: "none", x: 0, y: 0 }));
 	view.handleMouse(mouse("drag", { x: 0, y: -100 }));
 	view.handleMouse(mouse("click", { y: bottom.y }));
-	assert.equal(rail(view).footer, bottom.footer, "release and synthetic click must not restart the drag");
+	assert.equal(rail(view).content, bottom.content, "release and synthetic click must not restart the drag");
 });
 
 test("track press jumps toward the pointer and subsequent drags preserve the grab offset", async (t) => {
@@ -162,7 +167,7 @@ test("track press jumps toward the pointer and subsequent drags preserve the gra
 	assert.equal(view.handleMouse(mouse("press", { y: pointerY, screenY: pointerY + 50, screenX: 129 })).capture, true);
 	const middle = rail(view);
 	assert.equal(middle.thumbY, pointerY - Math.floor(middle.thumbHeight / 2));
-	assert.notEqual(middle.footer, bottom.footer);
+	assert.notEqual(middle.content, bottom.content);
 	view.handleMouse(mouse("drag", { y: pointerY - 2, x: 110 }));
 	assert.equal(rail(view).thumbY, middle.thumbY - 2);
 });
@@ -176,7 +181,7 @@ test("body/header/editor presses and non-primary clicks do not grab the scrollba
 	for (const fields of [{ x: 118 }, { y: 0 }, { y: initial.y + initial.height }, { button: "right" as const }]) {
 		assert.notEqual(view.handleMouse(mouse("press", fields)).capture, true);
 		view.handleMouse(mouse("drag", { y: -100 }));
-		assert.equal(rail(view).footer, initial.footer);
+		assert.equal(rail(view).content, initial.content);
 	}
 });
 
@@ -191,17 +196,17 @@ test("resize, loss of focus and disappearance of the rail cancel active drags", 
 	terminal.rows = 25;
 	const resized = rail(view, 80);
 	view.handleMouse(mouse("drag", { y: -100 }));
-	assert.equal(rail(view, 80).footer, resized.footer);
+	assert.equal(rail(view, 80).content, resized.content);
 	geometry = rail(view);
 	view.handleMouse(mouse("press", { y: geometry.thumbY }));
 	view.focused = false;
 	view.handleMouse(mouse("drag", { y: -100 }));
-	assert.equal(rail(view).footer, geometry.footer);
+	assert.equal(rail(view).content, geometry.content);
 	view.handleMouse(mouse("press", { y: geometry.thumbY }));
 	view.render(1);
 	assert.notEqual(view.handleMouse(mouse("press", { x: 0 })).capture, true);
 	view.handleMouse(mouse("drag", { y: -100 }));
-	assert.equal(rail(view).footer, geometry.footer);
+	assert.equal(rail(view).content, geometry.content);
 });
 
 test("dragging to the bottom resumes following streamed output", async (t) => {
@@ -217,9 +222,7 @@ test("dragging to the bottom resumes following streamed output", async (t) => {
 	update({ type: "text_delta", contentIndex: 0, delta: "new output\n".repeat(40) });
 	const after = rail(view);
 	assert.equal(after.thumbY + after.thumbHeight, after.y + after.height);
-	const position = after.footer.match(/(\d+)–(\d+)\/(\d+)/);
-	assert.ok(position);
-	assert.equal(position[2], position[3], "viewport ends at the latest line");
+	assert.match(after.content.trimEnd().split("\n").at(-1) ?? "", /new output/, "viewport ends at the latest line");
 });
 
 test("hover widens the thumb without rewrapping content or changing its position", async (t) => {
@@ -237,7 +240,7 @@ test("hover widens the thumb without rewrapping content or changing its position
 		initial,
 	);
 	assert.equal(rail(view).thumbY, geometry.thumbY);
-	assert.equal(rail(view).footer, geometry.footer);
+	assert.equal(rail(view).content, geometry.content);
 	assert.equal(
 		view.handleMouse(mouse("move", { button: "none", y: geometry.thumbY })).render,
 		false,
@@ -295,7 +298,6 @@ test("short content shows a full scrollbar thumb without an invalid position", a
 	await Promise.resolve();
 	const lines = view.render(120).map(stripTerminalSequences);
 	assert.ok(lines.slice(3, -4).every((line) => line.endsWith("┃")));
-	assert.doesNotMatch(lines.at(-1) ?? "", /\d+–\d+\/\d+/);
 	assert.notEqual(view.handleMouse(mouse("press")).capture, true);
 	view.handleMouse(mouse("drag", { y: -100 }));
 	assert.deepEqual(view.render(120).map(stripTerminalSequences), lines);
@@ -403,4 +405,71 @@ test("tool result reloads leave an unfinished assistant stream intact", async (t
 	await Promise.resolve();
 	await Promise.resolve();
 	assert.match(text(), /still streaming/);
+});
+
+test("Ctrl+X twice stops a live agent; any other key in between cancels", async (t) => {
+	let stops = 0;
+	const { view, text } = setup(async () => [], {
+		canStop: () => true,
+		stop: async () => {
+			stops++;
+			return undefined;
+		},
+	});
+	t.after(() => view.dispose());
+	const CTRL_X = "\x18";
+	assert.match(text(), /Ctrl\+X Stop/);
+
+	view.handleInput(CTRL_X);
+	assert.match(text(), /Press Ctrl\+X again to stop @test/);
+	view.handleInput("a"); // cancels
+	assert.doesNotMatch(text(), /Press Ctrl\+X again/);
+	view.handleInput(CTRL_X);
+	assert.equal(stops, 0, "one press only arms the stop");
+	view.handleInput(CTRL_X);
+	await new Promise((r) => setImmediate(r));
+	assert.equal(stops, 1);
+	assert.match(text(), /Stopped/);
+});
+
+test("Ctrl+X on an agent with no live process stops nothing", async (t) => {
+	let stops = 0;
+	const { view, text } = setup(async () => [], {
+		canStop: () => false,
+		stop: async () => {
+			stops++;
+			return undefined;
+		},
+	});
+	t.after(() => view.dispose());
+	assert.doesNotMatch(text(), /Ctrl\+X Stop/);
+	view.handleInput("\x18");
+	view.handleInput("\x18");
+	await new Promise((r) => setImmediate(r));
+	assert.equal(stops, 0);
+	assert.match(text(), /nothing to stop/);
+});
+
+test("pi's footer lines for the agent sit above the view's key line", async (t) => {
+	const sessionManager = SessionManager.inMemory("/work/project");
+	const { view } = setup(async () => [], {
+		footer: async () => ({
+			sessionManager,
+			model: { id: "claude-sonnet-5-5", provider: "anthropic", contextWindow: 200_000, reasoning: true } as never,
+			thinkingLevel: "high",
+			autoCompactionEnabled: true,
+			gitBranch: "main",
+			providerCount: 1,
+			isUsingSubscription: () => false,
+			statuses: () => new Map([["web", "web: on"]]),
+		}),
+	});
+	t.after(() => view.dispose());
+	await new Promise((r) => setImmediate(r));
+	const lines = view.render(120).map(stripTerminalSequences);
+	assert.equal(lines.length, 40, "the footer lines come out of the viewport, not past the screen");
+	assert.match(lines.at(-4) ?? "", /^\/work\/project \(main\)/);
+	assert.match(lines.at(-3) ?? "", /claude-sonnet-5-5 • high/);
+	assert.match(lines.at(-2) ?? "", /^web: on/);
+	assert.match(lines.at(-1) ?? "", /^\S.*Enter Send .*Esc Back/, "the key line starts in the footer's column");
 });

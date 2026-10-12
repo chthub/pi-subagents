@@ -55,8 +55,10 @@ class FakeWidget implements WidgetSurface {
 	add(agent: RegisteredAgent, status?: "running" | "idle"): void {
 		this.adds.push({ id: agent.agentId, status });
 	}
-	remove(agentId: string): void {
+	results: (string | undefined)[] = [];
+	remove(agentId: string, result?: string): void {
 		this.removed.push(agentId);
+		this.results.push(result);
 	}
 	setStatus(agentId: string, status: "idle" | "running"): void {
 		this.statuses.push({ id: agentId, status });
@@ -329,6 +331,15 @@ describe("AgentRegistry — in-tree routing", () => {
 });
 
 describe("AgentRegistry — stop / shutdown", () => {
+	it("stopAndRemove marks the row with the given end state (a failed follow-up is not 'stopped')", async () => {
+		const { registry, widget } = makeRegistry();
+		registry.register(new FakeAgent("a1"));
+		registry.register(new FakeAgent("a2"));
+		await registry.stopAndRemove("a1", "failed");
+		await registry.stopAndRemove("a2");
+		assert.deepEqual(widget?.results, ["failed", "stopped"]);
+	});
+
 	it("stopAndRemove stops the child and removes both bookkeeping entries", async () => {
 		const { registry, widget } = makeRegistry();
 		const agent = new FakeAgent("a1");

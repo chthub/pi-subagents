@@ -181,11 +181,17 @@ describe("interpretEvent — extension_ui_request (in-tree messages)", () => {
 		if (ev?.type === "agent_msg") assert.equal(ev.message.from, "");
 	});
 
-	it("ignores non-message extension_ui_request (not our key)", () => {
+	it("maps the child's own extension statuses (set and cleared) for its footer", () => {
 		assert.deepEqual(
 			interpretEvent({ type: "extension_ui_request", method: "setStatus", statusKey: "other", statusText: "x" }),
-			[],
+			[{ type: "status", key: "other", text: "x" }],
 		);
+		assert.deepEqual(interpretEvent({ type: "extension_ui_request", method: "setStatus", statusKey: "other" }), [
+			{ type: "status", key: "other" },
+		]);
+	});
+
+	it("ignores other extension_ui_request methods", () => {
 		assert.deepEqual(interpretEvent({ type: "extension_ui_request", method: "notify", message: "x" }), []);
 	});
 

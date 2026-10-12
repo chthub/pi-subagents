@@ -5,6 +5,10 @@
 // Special command type "split_utf8" writes one response whose UTF-8 bytes are
 // split mid-multibyte-character across two stdout chunks (the regression test
 // for the StringDecoder double-decode bug).
+//
+// Special command type "big_line" writes, in ONE stdout write, an agent_end
+// event padded to `size` characters followed by agent_settled and the
+// response — the shape of a real multi-MB run ending.
 import readline from "node:readline";
 
 const DELAYS = { get_state: 60, abort: 40 };
@@ -27,6 +31,14 @@ rl.on("line", (line) => {
 		const cut = Buffer.byteLength("\u8def\u5f84/") + 1;
 		process.stdout.write(buf.subarray(0, cut));
 		setTimeout(() => process.stdout.write(buf.subarray(cut)), 20);
+		return;
+	}
+
+	if (cmd.type === "big_line") {
+		const big = JSON.stringify({ type: "agent_end", messages: [{ role: "assistant", pad: "x".repeat(cmd.size) }] });
+		const settled = JSON.stringify({ type: "agent_settled" });
+		const response = JSON.stringify({ id: cmd.id, type: "response", command: "big_line", success: true });
+		process.stdout.write(`${big}\n${settled}\n${response}\n`);
 		return;
 	}
 

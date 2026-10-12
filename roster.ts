@@ -29,6 +29,8 @@ export interface RosterEntry {
 	model?: string;
 	/** Tool allowlist the agent was spawned with (not stored in its session). */
 	tools?: string[];
+	/** Per-turn limit it was spawned with — a revive keeps it. */
+	timeoutMs?: number;
 	/** Working directory the child ran in. */
 	cwd?: string;
 	/** Latest activity excerpt while running. */
@@ -132,6 +134,7 @@ interface TranscriptMessage {
 interface SpawnArgs {
 	label?: string;
 	tools?: string[];
+	timeoutMs?: number;
 }
 
 interface SpawnResultDetails {
@@ -193,6 +196,7 @@ export function rosterFromMessages(
 				sessionPath: d.sessionPath ?? previous?.sessionPath,
 				model: d.model ?? previous?.model,
 				tools: a.tools ?? previous?.tools,
+				timeoutMs: a.timeoutMs ?? previous?.timeoutMs,
 				cwd: previous?.cwd ?? cwd,
 				indent: previous?.indent ?? 0,
 				parentId: previous?.parentId,
