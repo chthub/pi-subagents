@@ -49,11 +49,14 @@ Pi 是一个极简、可扩展、由你定制的代理运行框架。pi-subagent
 ## 安装
 
 ```bash
-# 本地目录（开发）
-pi install /path/to/pi-subagents
+# npm（推荐）
+pi install npm:@chthub/pi-subagents
 
 # git
 pi install git:github.com/chthub/pi-subagents
+
+# 本地目录（开发）
+pi install /path/to/pi-subagents
 ```
 
 只在一次会话里试用：`pi -e /path/to/pi-subagents/index.ts`。

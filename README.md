@@ -49,11 +49,14 @@ Minimal means fewer concepts to learn, not an incomplete agent lifecycle. See [S
 ## Install
 
 ```bash
-# local checkout (development)
-pi install /path/to/pi-subagents
+# npm (recommended)
+pi install npm:@chthub/pi-subagents
 
 # git
 pi install git:github.com/chthub/pi-subagents
+
+# local checkout (development)
+pi install /path/to/pi-subagents
 ```
 
 Or try it for one session: `pi -e /path/to/pi-subagents/index.ts`.

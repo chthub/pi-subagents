@@ -1,7 +1,6 @@
 {
-  "name": "pi-subagents",
+  "name": "@chthub/pi-subagents",
   "version": "0.1.0",
-  "private": true,
   "description": "A minimal, complete sub-agent framework for pi: three tools, isolated contexts, parallel execution, automatic results, resumable sessions, and native UI.",
   "keywords": [
     "pi-package",
@@ -14,6 +13,10 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/chthub/pi-subagents.git"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
