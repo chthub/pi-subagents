@@ -12,7 +12,7 @@
 import { type CustomMessageEntryDraft, truncateTail } from "@earendil-works/pi-coding-agent";
 import type { AgentCompletion } from "./agent-process.js";
 import type { RegisteredAgent } from "./registry.js";
-import type { NotificationDetails } from "./types.js";
+import type { NotificationDetails, QuestionDetails } from "./types.js";
 import { stashOverflow, truncationMarker } from "./ui/context.js";
 import { agentTitle } from "./views.js";
 
@@ -35,6 +35,24 @@ export function truncateForContext(text: string): string {
 export function maybeWriteFullOutput(agentId: string, output: string): string {
 	const { stashPath } = stashOverflow(output, agentId, { keep: "tail" });
 	return stashPath ? truncationMarker(stashPath) : "";
+}
+
+/**
+ * A child's mid-turn agent_send to @parent: a non-blocking question, and the
+ * child keeps working. `kind` sets it apart from the final reply in the
+ * completion notification; the card reads `details`.
+ */
+export function questionMessage(
+	agentId: string,
+	label: string | undefined,
+	question: string,
+): { customType: "subagent-message"; content: string; display: true; details: QuestionDetails } {
+	return {
+		customType: "subagent-message",
+		content: JSON.stringify({ kind: "non_blocking_question", agent_id: `@${agentId}`, question }),
+		display: true,
+		details: { agent_id: agentId, label: label ? agentTitle(agentId, label) : `@${agentId}`, question },
+	};
 }
 
 /** One result/card; delivery and batching are owned by completion-inbox.ts. */
@@ -68,6 +86,9 @@ export function completionNotification(
 		type: "custom_message",
 		customType: "subagent-notification",
 		content: JSON.stringify({
+			// Which channel this is: the turn's final reply (a final report or a
+			// blocking question), never a mid-turn non-blocking question.
+			kind: "final_reply",
 			completion_id: completion.completionId,
 			status: completion.status,
 			agent_id: `@${agent.agentId}`,

@@ -23,8 +23,8 @@ Pi has no built‑in sub‑agents. So heavy, parallel, or context‑heavy work c
 
 - **Quiet context** — logs, search hits, and test output stay in the child's window. You get the final result, not the churn.
 - **True parallel** — fire several background agents at once. Ready results are delivered together at the parent's next turn boundary, with a separate card per result. No worker queue or result tool.
-- **Stay in control** — `agent_send` redirects a running agent (or wakes an idle one); `agent_stop` stops its process. Final replies return automatically; at the default depth, children have no agent tools.
-- **Follow-ups keep context** — a finished agent stays resident by default (idle, zero tokens; ~180 MB RAM each), and `agent_send` to an agent whose process is gone resumes it from its session file. A sub-agent that needs information or a decision ends its reply with the question; the parent answers with `agent_send` and the agent continues where it stopped.
+- **Stay in control** — `agent_send` redirects a running agent (or wakes an idle one); `agent_stop` stops its process. Final replies return automatically, carrying blocking questions and the final report; at the default depth, a child also has `agent_send` to `@parent`, for non-blocking questions only.
+- **Follow-ups keep context** — a finished agent stays resident by default (idle, zero tokens; ~180 MB RAM each), and `agent_send` to an agent whose process is gone resumes it from its session file. A sub-agent that needs information or a decision ends its reply with the question; the parent answers with `agent_send` and the agent continues where it stopped. A non-blocking question goes to `@parent` with `agent_send` mid-turn, and the child keeps working.
 - **Pi‑native** — rendering, sessions, and attach all reuse pi's own mechanisms; the cards look like built‑in tools because they are.
 - **Inherit or override** — a child inherits your model and thinking level by default; override it per child. A cheap model for recon, a strong one for the build.
 - **No hidden limits** — no token ceiling, no deadline, no concurrency cap by default. An optional `timeoutMs` adds a guardrail when you want one.
@@ -91,7 +91,7 @@ Pi calls `agent_send` to steer the running agent (after its current response and
 
 ## Enabling the tools
 
-The three agent tools are registered **inactive**: a conversation that never delegates carries no schema for them. The parameterless `subagent_enable` activates them for the next model request. The activation is recorded in the transcript, so a resumed session keeps them.
+The three agent tools are registered **inactive** in the main session: a conversation that never delegates carries no schema for them. In a sub-agent, `agent_send` is active from the start. The parameterless `subagent_enable` activates them for the next model request. The activation is recorded in the transcript, so a resumed session keeps them.
 
 ## Coordination skill
 
@@ -132,7 +132,7 @@ Below the editor, one line per sub-agent of this conversation — running, idle,
 
 | Key | Default | Meaning |
 |---|---|---|
-| `maxDepth` | `1` | Levels of agents allowed below the main session. `1`: the main session spawns sub-agents, sub-agents cannot spawn. `2`: sub-agents may spawn one more level. The main session's value applies to the whole tree; an agent at the limit gets no agent tools at all. |
+| `maxDepth` | `1` | Levels of agents allowed below the main session. `1`: the main session spawns sub-agents, sub-agents cannot spawn. `2`: sub-agents may spawn one more level. The main session's value applies to the whole tree; a sub-agent at the limit keeps only `agent_send`, restricted to `@parent`. |
 
 An invalid value falls back to its default, with a warning in the TUI.
 
@@ -154,12 +154,12 @@ The directory lives **outside** pi's standard session tree so `pi -r` (resume) s
 | `label` | string | required | Short label shown on the tool card, notification card, widget row, and session name. |
 | `model` | string | inherited | Override the sub‑agent's model. Specified but not registered → **error, no silent fallback**. |
 | `thinking` | `"off"`…`"max"` | inherited | Override thinking level; omit to run at your current session's level. |
-| `tools` | string[] | all | Whitelist of tool names visible to the sub‑agent — anything else is invisible. |
+| `tools` | string[] | all | Whitelist of tool names visible to the sub‑agent — anything else is invisible. `agent_send` is always kept; no need to list it. |
 | `run_in_background` | boolean | `true` | Background (default) returns an `agent_id` immediately and delivers a completion notification carrying the final output; `false` blocks until the result is ready. When omitted in `pi -p` / json mode it runs in the foreground (the host exits after its reply). Sub-agents don't have this parameter — foreground only. |
 | `timeoutMs` | number | none | Optional limit (ms) for each turn: the task itself and every later turn an `agent_send` starts. On firing, the extension aborts the turn, waits for it to settle (hard-stopping it if it doesn't), and reports it as stopped. |
 | `persistent` | boolean | `true` (root) / `false` (inside a sub-agent) | Keep the child resident (idle, zero tokens) after completion so follow-ups skip the restart; `agent_stop` tears it down. With `false` it exits when done — `agent_send` still resumes it from its session. |
 
-The final reply, including a blocking question, returns automatically. With the default `maxDepth=1`, children have no agent tools; the parent handles coordination.
+The final reply returns automatically and carries blocking questions and the final report. With the default `maxDepth=1`, a child's only agent tool is `agent_send` to `@parent`, for non-blocking questions only; the parent handles coordination.
 
 #### `agent_stop` — cancel an agent task
 
@@ -178,7 +178,7 @@ Stopping neither deletes saved conversations nor rolls back file changes or canc
 
 A message to an idle child starts a new model turn; a message to an exited child resumes its saved conversation. The final reply returns automatically.
 
-The tool addresses only direct children, or `@parent` when the caller has agent tools. It does not deliver directly to siblings; cross-level coordination requires forwarding by the parent.
+The tool addresses only direct children, or, in a sub-agent, `@parent` (its direct parent; a sub-agent at the depth limit reaches only `@parent`). The parent receives it as `{kind: "non_blocking_question", agent_id, question}`, while a completion notification carries `kind: "final_reply"`. A message to `@parent` does not end the child's turn: the parent reads it after its current response and tool batch, and its reply appears in the child's conversation once the child's current tool calls finish or its turn ends. A parent blocked in a foreground `agent_spawn` reads it only after that call returns. It does not deliver directly to siblings; cross-level coordination requires forwarding by the parent.
 
 ## Advanced
 
@@ -209,7 +209,7 @@ Every sub‑agent is a resident `pi --mode rpc` child with a persisted session:
 - **Send/stop** — `agent_send` uses steering in both directions (after the current response/tool batch, before the next request); idle children wake. `agent_stop` closes stdin for a graceful shutdown, without a new completion notification; already queued results remain deliverable.
 - **Resident idle** — by default the child stays resident after completion (idle, zero tokens). A later `agent_send` wakes it to continue the same context; `agent_stop` tears it down. The completion notification and list row carry the `idle` marker.
 - **Resume** — `agent_send` to a direct child whose process is gone starts `pi --mode rpc --session <path>` with the message as its next turn; the answer comes back as a notification.
-- **Questions and deliverables** — every spawn prompt tells the child to pause work and end its reply with a question when blocked; the parent answers with `agent_send`. Completed deliverables return automatically, so the child should not send a separate completion report.
+- **Questions and deliverables** — every spawn prompt tells the child how to use its two channels up. The final reply carries the final report and blocking questions: when blocked, end the reply with the question; the parent answers with `agent_send`. `agent_send` to `@parent` carries only non-blocking questions: send the question and keep working; never blocking questions, progress updates, or results. Completed deliverables return automatically, so the child should not send a separate completion report. A foreground spawn's prompt adds that the parent reads mid-turn messages only after the reply ends, so non-blocking questions go in the reply too. Every child has `agent_send`; a `tools` allowlist never removes it.
 - **Attach / review** — sub‑agent sessions live in `<agent dir>/subagent-sessions/` (see [Configuration](#configuration)). Find the session path in the main conversation and run `pi --session <path>` — or ask the LLM, the notification carries the path too.
 - **Graceful turn limits (opt‑in)** — no hidden deadline: a sub‑agent runs until it finishes or is stopped unless you pass `timeoutMs`. No abrupt SIGTERM. No token limits — usage is only reported on the notification card.
 

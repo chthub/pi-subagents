@@ -53,10 +53,10 @@ import { canSpawnAt, envInt, loadConfig } from "./config.js";
 import { type AgentActivity, type AgentTreeEvent, MSG_STATUS_KEY, TREE_STATUS_KEY } from "./event-interpret.js";
 import { createLiveChannels } from "./live-output.js";
 import { resolveModel } from "./model.js";
-import { completionNotification, maybeWriteFullOutput, truncateForContext } from "./notification.js";
+import { completionNotification, maybeWriteFullOutput, questionMessage, truncateForContext } from "./notification.js";
 import { type AgentMessage, formatFrom } from "./protocol.js";
 import { AgentRegistry, type RegisteredAgent, type WidgetSurface } from "./registry.js";
-import { renderNotification } from "./render.js";
+import { renderNotification, renderQuestion } from "./render.js";
 import { Roster } from "./roster.js";
 import { persistRoster, rosterFromBranch } from "./roster-state.js";
 import { runSpawnSession, type SpawnOutcome } from "./spawn-session.js";
@@ -249,7 +249,7 @@ const SpawnThinkingField = Type.Optional(
 );
 const SpawnToolsField = Type.Optional(
 	Type.Array(Type.String(), {
-		description: "Tool allowlist for the sub-agent. Omit to grant all tools.",
+		description: "Tool allowlist for the sub-agent. Omit to grant all tools. agent_send is always kept.",
 	}),
 );
 const SpawnTimeoutField = Type.Optional(
@@ -314,14 +314,53 @@ const StopParamsSchema = Type.Object({
 	}),
 });
 
-const SendParamsSchema = Type.Object({
-	to: Type.String({
-		description:
-			'The agent id from agent_spawn (e.g. "@max" — a spawn result or completion ' +
-			'notification carries it), or "@parent" to message the session that spawned you.',
-	}),
-	message: Type.String({ description: "The message text." }),
-});
+/**
+ * Who agent_send can reach from this process: the root reaches its children;
+ * a child that can spawn also reaches @parent; a child at the depth limit
+ * (no other agent tools) reaches only @parent.
+ */
+export type SendReach = "children" | "children+parent" | "parent";
+
+export function sendReach(hasParent: boolean, canSpawn: boolean): SendReach {
+	if (!hasParent) return "children";
+	return canSpawn ? "children+parent" : "parent";
+}
+
+const SEND_TO_DESCRIPTIONS: Record<SendReach, string> = {
+	children: 'The agent id from agent_spawn (e.g. "@max" — a spawn result or completion notification carries it).',
+	"children+parent":
+		'The agent id from agent_spawn (e.g. "@max" — a spawn result or completion ' +
+		'notification carries it), or "@parent" to message the agent that spawned you.',
+	parent: '"@parent" — the agent that spawned you.',
+};
+
+export function buildSendParamsSchema(reach: SendReach): ReturnType<typeof Type.Object> {
+	return Type.Object({
+		to: Type.String({ description: SEND_TO_DESCRIPTIONS[reach] }),
+		message: Type.String({ description: "The message text." }),
+	});
+}
+
+/** agent_send description: what each reachable target does with a message. */
+export function sendDescription(reach: SendReach): string {
+	const toChildren =
+		"Delivered after the target's current response and tool batch, before its next model request. " +
+		"Starts a new model turn for idle children, whose reply arrives as another completion, or resumes exited " +
+		"children with recoverable saved sessions. The child's final reply is returned automatically.";
+	const toParent =
+		"Messages to @parent are only for non-blocking questions; blocking questions and your final report go " +
+		"in your final reply. A message to @parent does not end your turn: your parent reads it after its " +
+		"current response and tool batch (if it is waiting on your reply, only after that reply ends). Your " +
+		"parent's reply appears in your conversation once your current tool calls finish or your turn ends.";
+	switch (reach) {
+		case "children":
+			return `Send a message to a direct child. ${toChildren}`;
+		case "children+parent":
+			return `Send a message to a direct child, or to @parent. ${toChildren} ${toParent}`;
+		case "parent":
+			return `Send a message to @parent, the agent that spawned you. ${toParent}`;
+	}
+}
 
 // ─── Helpers ─────────────────────────────────────────────────
 
@@ -384,15 +423,10 @@ async function handleMessage(
 				return { ok: true, verb: "delivered" };
 			}
 			// My child addressed "@parent" (= me): inject into my session.
-			pi.sendMessage(
-				{
-					customType: "subagent-message",
-					content: `${formatFrom(d.message.from)}${d.message.message}`,
-					display: true,
-					details: { from: d.message.from, message: d.message.message },
-				},
-				{ deliverAs: "steer", triggerTurn: true },
-			);
+			pi.sendMessage(questionMessage(d.message.from, registry.lookup(d.message.from)?.label, d.message.message), {
+				deliverAs: "steer",
+				triggerTurn: true,
+			});
 			return { ok: true, verb: "delivered" };
 		}
 		case "error": {
@@ -407,13 +441,32 @@ async function handleMessage(
 
 /**
  * Appended to every spawn prompt: the child may not load this extension, so
- * the "ask by ending the reply" contract travels with the task itself. The parent
- * answers with agent_send, which resumes the child with its context.
+ * the reply contract travels with the task itself. Two channels up: the final
+ * reply (returned automatically) carries the final report and blocking
+ * questions; agent_send to @parent (always in a child's allowlist) carries
+ * only non-blocking questions, and the child keeps working. A foreground
+ * parent is blocked in its agent_spawn call, so it reads such a message only
+ * after this reply ends — the note says so instead of promising more.
  */
-const CHILD_PROMPT_NOTE =
-	"\n\n(Your final reply is returned to your parent automatically. If missing information prevents you from " +
-	"continuing, ask the question and end this reply; your parent's answer will resume this conversation. " +
-	"When finished, return your result directly. Do not send a separate completion report.)";
+export function childPromptNote(opts: { foreground: boolean }): string {
+	const parts = [
+		"Your final reply is returned to your parent automatically. Use it for your final report and for " +
+			"blocking questions. When finished, return your result directly; do not send a separate completion " +
+			"report. If missing information prevents you from continuing, ask the question and end this reply; " +
+			"your parent's answer will resume this conversation.",
+		'Use agent_send with to="@parent" only for non-blocking questions, ones you can keep working ' +
+			"around while you wait: send the question and keep working. Your parent's reply appears in your " +
+			"conversation once your current tool calls finish or your turn ends; you do not need to wait or " +
+			"check for it. Do not use agent_send for blocking questions, progress updates, or results.",
+	];
+	if (opts.foreground) {
+		parts.push(
+			"Your parent is waiting for this reply and reads agent_send messages only after it ends, so ask " +
+				"non-blocking questions in this reply instead.",
+		);
+	}
+	return `\n\n(${parts.join(" ")})`;
+}
 
 /** Appended to the output of a turn stopped by timeoutMs. */
 const TIME_LIMIT_NOTE = "(stopped \u2014 reached the task time limit; the output above is partial)";
@@ -447,8 +500,9 @@ function transcriptEnabledAgentTools(ctx: ExtensionContext): boolean {
 export default function (pi: ExtensionAPI) {
 	// Spawn depth limit (pi-subagents.json `maxDepth`, default 1: sub-agents
 	// cannot spawn). The main session's limit travels down the tree; at the
-	// limit this process registers no agent tools at all — no schema, nothing
-	// to enable — and hides the coordination skill it could not act on.
+	// limit this process registers no spawn/stop tools and nothing to enable,
+	// only an @parent-only agent_send in a child, and hides the coordination
+	// skill it could not act on.
 	const { config, warnings: configWarnings } = loadConfig();
 	const maxDepth = envInt(process.env.PI_SUBAGENT_MAX_DEPTH) ?? config.maxDepth;
 	const canSpawn = canSpawnAt(MY_DEPTH, maxDepth);
@@ -584,9 +638,9 @@ export default function (pi: ExtensionAPI) {
 				: "Background spawns return an agent id immediately. Ready replies enter together after the current " +
 					"response and tool batch, before the next model request; an idle parent wakes once for the ready batch. " +
 					"Foreground spawns wait and return the result directly. ") +
-			(childrenCanSpawn
-				? `Children can spawn their own sub-agents (maxDepth=${maxDepth}). `
-				: "Children have no agent tools. ") +
+			(childrenCanSpawn ? `Children can spawn their own sub-agents (maxDepth=${maxDepth}). ` : "") +
+			"A child uses agent_send only for non-blocking questions to you; blocking questions and its final " +
+			"report come in its final reply. " +
 			"Large results are truncated with a path to the full output.",
 		promptSnippet: "Start a sub-agent with an independent context",
 		parameters: SpawnParamsSchema,
@@ -782,7 +836,7 @@ export default function (pi: ExtensionAPI) {
 			let outcome: SpawnOutcome;
 			try {
 				outcome = await runSpawnSession(agent, {
-					task: task + CHILD_PROMPT_NOTE,
+					task: task + childPromptNote({ foreground: !runInBackground }),
 					runInBackground,
 					signal,
 					hooks: {
@@ -1058,22 +1112,22 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// ── agent_send ──────────────────────────────────────
-	registerTool({
+	// Every child gets agent_send, active from the start: messaging its parent
+	// is independent of spawning, so a child at the depth limit keeps this one
+	// tool, restricted to @parent.
+	const reach = sendReach(HAS_PARENT, canSpawn);
+	(HAS_PARENT ? pi.registerTool.bind(pi) : registerTool)({
 		name: "agent_send",
 		label: "Send Message",
-		defaultActive: false,
-		description:
-			"Send a message to a direct child, or to @parent when this tool is available in a child. " +
-			"Delivered after the target's current response and tool batch, before its next model request. " +
-			"Starts a new model turn for idle children, whose reply arrives as another completion, or resumes exited " +
-			"children with recoverable saved sessions. " +
-			"The child's final reply is returned automatically.",
-		promptSnippet: "Send a message to an existing sub-agent",
-		parameters: SendParamsSchema,
+		defaultActive: HAS_PARENT,
+		description: sendDescription(reach),
+		promptSnippet:
+			reach === "parent" ? "Send a message to your parent agent" : "Send a message to an existing sub-agent",
+		parameters: buildSendParamsSchema(reach),
 
 		async execute(_toolCallId, raw, _signal, onUpdate, ctx) {
 			captureUi(ctx);
-			const params = raw as SendParams;
+			const params = raw as unknown as SendParams;
 			const to = params.to?.trim();
 			const message = params.message?.trim();
 			// Honour the @ reference form we teach — but never strip @parent
@@ -1096,6 +1150,10 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 
+			if (reach === "parent" && target !== "@parent") {
+				const error = 'Only "@parent" is reachable from this agent.';
+				return { content: [{ type: "text", text: error }], details: { to: target, error }, isError: true };
+			}
 			onUpdate?.({
 				content: [{ type: "text", text: `Sending to ${atId(target)}\u2026` }],
 				details: { to: target },
@@ -1407,6 +1465,7 @@ export default function (pi: ExtensionAPI) {
 
 	// ── Notification card (user side) ───────────────────
 	pi.registerMessageRenderer("subagent-notification", renderNotification);
+	pi.registerMessageRenderer("subagent-message", renderQuestion);
 
 	// ── Cleanup on exit ─────────────────────────────────
 	// A resumed (or /tree-navigated) conversation that had enabled the agent

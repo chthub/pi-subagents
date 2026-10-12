@@ -15,9 +15,9 @@
 import { initTheme, type Theme } from "@earendil-works/pi-coding-agent";
 import type { AgentProcess } from "./agent-process.js";
 import type { AgentActivity } from "./event-interpret.js";
-import { renderNotification } from "./render.js";
+import { renderNotification, renderQuestion } from "./render.js";
 import { Roster } from "./roster.js";
-import type { RenderEvent, SubagentDetails } from "./types.js";
+import type { QuestionDetails, RenderEvent, SubagentDetails } from "./types.js";
 import { createPreviewRuntime } from "./ui/preview-runtime.js";
 import type { WidgetResult } from "./ui/widget.js";
 import { sendView, spawnView, stopView } from "./views.js";
@@ -66,6 +66,11 @@ const QUERIES_STEER =
 const REPORTS_LABEL = "Audit the reports table";
 const REPORTS_PROMPT = "Audit the reports table for stale aggregates.";
 const CI_FOLLOW_UP = "Continue: write a fix PR description for each of the five issues";
+const QUERIES_QUESTION =
+	"Should the audit also cover the archived orders_2023 table? Continuing with the live table meanwhile.";
+const QUERIES_ANSWER = "Skip the archived table; the live orders table only.";
+const QUERIES_RESULT =
+	"Two slow queries on orders: a missing index on (customer_id, created_at), and a full scan in the monthly report.";
 
 const params: AgentParams = {
 	prompt: "Check the CI config for flaky tests. Look at the pipeline definition and report issues with evidence.",
@@ -167,6 +172,7 @@ type StreamCard =
 			isError?: boolean;
 			expanded?: boolean;
 	  }
+	| { kind: "question"; details: QuestionDetails }
 	| {
 			kind: "notification";
 			details: {
@@ -295,6 +301,8 @@ function renderPathCard(card: StreamCard, w: number): string[] {
 		}
 		case "notification":
 			return renderLines(renderNotification({ details: card.details }, { expanded: false }, theme), w);
+		case "question":
+			return renderLines(renderQuestion({ details: card.details }, { expanded: false }, theme), w);
 	}
 }
 
@@ -1061,7 +1069,94 @@ const pathE: LifecyclePath = {
 	height: 0,
 };
 
-const sections: LifecyclePath[] = [pathA, pathB, pathC, pathD, pathE];
+// Path F — non-blocking question: a background agent asks @parent mid-turn and
+// keeps working; the parent answers with agent_send; the final reply arrives
+// as the completion notification.
+const queriesArgs: AgentParams = { ...bgArgs, label: QUERIES_LABEL, prompt: QUERIES_PROMPT };
+const queriesSpawn: StreamCard = {
+	kind: "agent",
+	args: queriesArgs,
+	details: details({ runInBackground: true, label: QUERIES_LABEL }),
+	isPartial: false,
+};
+const queriesQuestion: StreamCard = {
+	kind: "question",
+	details: { agent_id: "zoe", label: `@zoe — ${QUERIES_LABEL}`, question: QUERIES_QUESTION },
+};
+const answerArgs = { to: "zoe", message: QUERIES_ANSWER };
+const queriesWorking: WidgetAgent[] = [
+	{ id: "zoe", label: QUERIES_LABEL, startedOffset: 12_000, activity: activityTool },
+];
+const pathF: LifecyclePath = {
+	title: "F · non-blocking question — working → asks → answer → final reply",
+	phases: [
+		{ name: "working", status: "working", ticks: 20, stream: [queriesSpawn], widget: queriesWorking },
+		{
+			name: "asks",
+			status: "asks",
+			ticks: 25,
+			stream: [queriesSpawn, queriesQuestion],
+			widget: queriesWorking,
+		},
+		{
+			name: "answer",
+			ticks: 15,
+			stream: [
+				queriesSpawn,
+				queriesQuestion,
+				{ kind: "control", args: answerArgs, details: { to: "zoe", message: QUERIES_ANSWER }, isPartial: true },
+			],
+			widget: queriesWorking,
+		},
+		{
+			name: "answer delivered",
+			status: "answer",
+			ticks: 20,
+			stream: [
+				queriesSpawn,
+				queriesQuestion,
+				{
+					kind: "control",
+					args: answerArgs,
+					details: { to: "zoe", label: QUERIES_LABEL, message: QUERIES_ANSWER },
+					isPartial: false,
+				},
+			],
+			widget: queriesWorking,
+		},
+		{
+			name: "final reply",
+			status: "final reply",
+			ticks: 30,
+			stream: [
+				queriesSpawn,
+				queriesQuestion,
+				{
+					kind: "control",
+					args: answerArgs,
+					details: { to: "zoe", label: QUERIES_LABEL, message: QUERIES_ANSWER },
+					isPartial: false,
+				},
+				{
+					kind: "notification",
+					details: {
+						status: "completed",
+						agent_id: "zoe",
+						label: `@zoe — ${QUERIES_LABEL}`,
+						result: QUERIES_RESULT,
+						usage: { durationMs: 41_000, tokens: 2100, toolUses: 6 },
+						idle: true,
+					},
+				},
+			],
+			widget: [{ id: "zoe", label: QUERIES_LABEL, startedOffset: 41_000, idle: true }],
+		},
+	],
+	pauseTicks: 30,
+	height: 0,
+};
+
+const sections: LifecyclePath[] = [pathA, pathB, pathC, pathD, pathE, pathF];
 
 // ── Live loop ────────────────────────────────────────────────
 

@@ -64,7 +64,7 @@ export interface AgentProcessOptions {
 	model?: string;
 	/** Reasoning intensity ("off"…"max"), passed as --thinking. */
 	thinking?: string;
-	/** Tool allowlist (comma-joined into --tools). */
+	/** Tool allowlist (comma-joined into --tools; agent_send is always added). */
 	tools?: string[];
 	/** Short task label (notification card). */
 	label: string;
@@ -190,7 +190,9 @@ export class AgentProcess {
 		const args: string[] = [];
 		if (options.model) args.push("--model", options.model);
 		if (options.thinking) args.push("--thinking", options.thinking);
-		if (options.tools && options.tools.length > 0) args.push("--tools", options.tools.join(","));
+		// agent_send is the child's channel to @parent: an allowlist never removes it.
+		if (options.tools && options.tools.length > 0)
+			args.push("--tools", [...new Set([...options.tools, "agent_send"])].join(","));
 		if (options.resumeSession) {
 			// Revive: the session file already carries its name, model and thinking.
 			args.push("--session", options.resumeSession);

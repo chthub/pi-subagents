@@ -60,6 +60,14 @@ export type SubagentDetails = {
  * The LLM sees only the JSON `content` block; `details` never enter
  * context (verified against pi's convertToLlm).
  */
+/** Card data for a child's non-blocking question (never enters LLM context). */
+export interface QuestionDetails {
+	agent_id: string;
+	/** `@id — label` title. */
+	label: string;
+	question: string;
+}
+
 export interface NotificationDetails {
 	/** Absent in older persisted cards. */
 	completionId?: string;

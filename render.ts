@@ -8,7 +8,7 @@
  */
 
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import type { NotificationDetails } from "./types.js";
+import type { NotificationDetails, QuestionDetails } from "./types.js";
 import {
 	type BodyComponent,
 	type CardBody,
@@ -81,6 +81,29 @@ export function renderNotification(
 			header: { icon, name: "Agent", title: d.label, tail: status, meta: metaParts },
 			body,
 			footer: d.sessionPath,
+			expanded,
+		},
+		theme,
+	);
+}
+
+/** A child's question while it keeps working: `? Agent "@id — label" asks (non-blocking)`. */
+export function renderQuestion(
+	message: { details?: QuestionDetails },
+	{ expanded }: { expanded: boolean },
+	theme: Theme,
+): Component {
+	const d = message.details;
+	if (!d) return renderNoDetailsCard(theme);
+	return renderNotificationCard(
+		{
+			header: {
+				icon: { glyph: "?", color: "accent" },
+				name: "Agent",
+				title: d.label,
+				tail: { text: "asks (non-blocking)", color: "muted" },
+			},
+			body: d.question.trim() ? { message: d.question.trim() } : {},
 			expanded,
 		},
 		theme,

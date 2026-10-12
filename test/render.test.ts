@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { initTheme } from "@earendil-works/pi-coding-agent";
-import { renderNotification } from "../render.js";
+import { renderNotification, renderQuestion } from "../render.js";
 import { safeTitle } from "../ui/width.js";
 
 // Fold hints render through keyHint, which reads the real global theme.
@@ -145,4 +145,16 @@ test("safeTitle caps long titles with a trailing ellipsis", () => {
 	const out = safeTitle(long, 40);
 	assert.equal(out.length, 40);
 	assert.equal(out.endsWith("…"), true);
+});
+
+test("a non-blocking question renders as its own card, not a completion", () => {
+	const card = renderQuestion(
+		{ details: { agent_id: "zoe", label: "@zoe — schema", question: "Should I include views?" } },
+		{ expanded: false },
+		theme,
+	);
+	const text = renderText(card, 120);
+	assert.ok(text.includes('? Agent "@zoe — schema" asks (non-blocking)'), text);
+	assert.ok(text.includes("Should I include views?"));
+	assert.ok(!text.includes("completed"));
 });

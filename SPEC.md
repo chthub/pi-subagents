@@ -51,7 +51,7 @@ A Pi extension registers three verb-suffixed primitives, consistent with built-i
 
 - **`agent_spawn`**: create an isolated agent, either foreground or background, with optional persistent residency.
 - **`agent_stop`**: stop a running or resident child process.
-- **`agent_send`**: message a direct child; a child with this tool may also address `@parent`. At the default depth, children have no agent tools, final replies return automatically, and the parent handles coordination.
+- **`agent_send`**: message a direct child; every child may also address `@parent`, its direct parent. At the default depth, a child's only agent tool is this one, restricted to `@parent` and used only for non-blocking questions; final replies return automatically and carry blocking questions and the final report, and the parent handles coordination.
 
 Each child is a resident `pi --mode rpc` process with an independent context and a persisted session.
 
@@ -66,6 +66,7 @@ Each child is a resident `pi --mode rpc` process with an independent context and
 7. On host exit, close child stdin for orderly shutdown without orphan processes; remove descendant display rows together. Never delete saved sessions.
 8. When missing information prevents progress, the child asks a question and ends its reply. The parent receives it automatically and answers with `agent_send`, preserving context.
 9. Keep persistent children idle after completion, with no model tokens consumed; resume them with `agent_send` instead of spawning again.
+10. When the child has a non-blocking question (one it can keep working around), it sends it to `@parent` with `agent_send` and keeps working; the parent's reply appears in the child's conversation once its current tool calls finish or its turn ends (a finished turn is resumed by the reply). `agent_send` is not used for blocking questions, progress updates, or results.
 
 ## UI design
 
@@ -109,16 +110,29 @@ session: /path/to/session.jsonl
   Focus on indexes and slow queries in the orders table
 
 ✓ agent_send "@parent" delivered
-  Review complete; please confirm the deployment window
+  Should the report also cover the archived tables?
 
 ✗ agent_stop "@max" stop failed
   agent not found
 ```
 
-- `agent_send.to` is a short child ID returned by spawn/notification, or `@parent` when available.
+- `agent_send.to` is a short child ID returned by spawn/notification, or `@parent` in a child. A child at the depth limit accepts only `@parent`.
 - Message text appears in full, including multiple lines; messages over ten lines use a head preview when collapsed, consistent with write.
 - Animation updates the same line, never appends new lines.
 - Errors retain the same shape: an error-colored status line and a dim explanation.
+
+### Non-blocking question card
+
+A child's `agent_send` to `@parent`, as the parent sees it:
+
+```text
+? Agent "@zoe — research db schema" asks (non-blocking)
+<blank line>
+Should the report also cover the archived tables?
+```
+
+- Same `customMessageBg` shell as the completion card; the `?` icon and `asks (non-blocking)` set it apart from a final reply.
+- Model content is `{kind: "non_blocking_question", agent_id, question}`; the card title and label stay in `details`.
 
 ### Completion notification card
 
@@ -227,7 +241,8 @@ automatic result: batched turn_end / agent_before_settle entries;
 - Messaging uses in-memory event flow, not sockets, file polling, or a query tool.
 - A running parent consumes injected messages without preemption; an idle parent may start a model turn.
 - Each `AgentProcess` owns a client connection, so the connection identifies the child sending an event.
-- `PI_SUBAGENT_AGENT_ID` identifies a child process. Only instances below `maxDepth` register agent tools. At the default depth, final replies return automatically instead of child `agent_send` calls.
+- `PI_SUBAGENT_AGENT_ID` identifies a child process. Only instances below `maxDepth` register `agent_spawn` and `agent_stop`; every child registers `agent_send`, and one at the limit reaches only `@parent`. Final replies return automatically and carry blocking questions and the final report; `agent_send` to `@parent` carries only non-blocking questions.
+- Each `@parent` message is injected with its own `triggerTurn`, outside the completion inbox, so an idle parent spends a model turn on each one. The child prompt therefore rules out progress updates.
 
 ### Transport validation (2026-08-10)
 
@@ -245,11 +260,11 @@ automatic result: batched turn_end / agent_before_settle entries;
 
 - Ready results first enter a session-scoped inbox. A busy parent receives the whole ready batch after its current response and tool batch, before the next model call: the steering delivery point. `turn_end` appends custom entries and requests at most one continuation; `agent_before_settle` handles the final boundary. Do not interrupt tools or generation, wait for unfinished children, use the follow-up queue, or depend on the global steering consumption mode.
 - Idle delivery uses one `setImmediate` to collect ready callbacks. Append the earlier cards without triggering a turn, then let the final card start one run with `deliverAs: "steer", triggerTurn: true`. Card count is not model-call count.
-- Model content contains `{completion_id, status, agent_id, result, session_path}` and, for persistent completion, `idle: true`.
+- Model content contains `{kind: "final_reply", completion_id, status, agent_id, result, session_path}` and, for persistent completion, `idle: true`. `kind` tells the parent this is the turn's final reply (a final report or a blocking question), as opposed to a mid-turn `{kind: "non_blocking_question", agent_id, question}` from `agent_send` to `@parent`. A foreground spawn's final reply is the `agent_spawn` tool result itself.
 - A completion ID combines a process-instance UUID and settlement sequence. Deduplicate the event, not its text or agent ID. Preserve different turns, including acknowledgements. A deliberate stop neither emits a new completion nor retracts queued results.
 - On abort/error, save results without requesting continuation. Later idle results remain silent until another accepted run. Shutdown/session replacement cancels callbacks; senders from the old session cannot write to the new one.
 - Parameter definitions explain parameters. Tool descriptions/snippets explain calls. Coordination rules have one source in [`skills/pi-subagents-workflow/SKILL.md`](skills/pi-subagents-workflow/SKILL.md), not duplicated tool guidelines. `package.json` declares and ships the skill; whole-package discovery advertises its name, description, and path before tool activation, while the body is read on demand. A process that cannot spawn removes the skill from its system prompt in `before_agent_start`. Model-facing guidance uses English.
-- The child prompt suffix explains automatic final replies: ask and end the reply when blocked on missing information, return the result directly when finished, and do not send a duplicate completion report. The skill adds no preset roles, enforced workflow, or default budgets.
+- The child prompt suffix explains both channels up. The final reply carries the final report and blocking questions: ask and end the reply when blocked on missing information, return the result directly when finished, and do not send a duplicate completion report. `agent_send` to `@parent` carries only non-blocking questions: send and keep working; never blocking questions, progress updates, or results. A foreground spawn adds that the parent reads mid-turn messages only after the reply ends, since it is blocked in its tool call until then, so non-blocking questions go in the reply too. Every child has `agent_send`: the extension adds it to any `tools` allowlist, on spawn and on revive. The skill adds no preset roles, enforced workflow, or default budgets.
 - Timely delivery prevents follow-up queue delay. It cannot guarantee a report remains current after subsequent code changes. Do not filter result text or overwrite one child's earlier reports.
 - Card-only rendering information stays in `details`, outside model context.
 - Spawn failure already returns an error tool result and therefore does not also emit a completion notification.
@@ -270,7 +285,7 @@ automatic result: batched turn_end / agent_before_settle entries;
 
 ### Nesting
 
-`PI_SUBAGENT_DEPTH` and `PI_SUBAGENT_MAX_DEPTH` propagate the main session's depth limit. At default `maxDepth=1`, children have no agent tools. Raising the limit allows eligible children to delegate and communicate along parent-child edges. Each parent registry assigns its own children's IDs.
+`PI_SUBAGENT_DEPTH` and `PI_SUBAGENT_MAX_DEPTH` propagate the main session's depth limit. At default `maxDepth=1`, a child's only agent tool is `agent_send`, restricted to `@parent`, used only for non-blocking questions, and active from the start: messaging the parent is independent of spawning. Raising the limit allows eligible children to delegate and communicate along parent-child edges. Each parent registry assigns its own children's IDs.
 
 ### Single-display rule (2026-08-22)
 

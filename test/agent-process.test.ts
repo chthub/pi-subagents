@@ -183,12 +183,20 @@ describe("AgentProcess — spawnAndSend", () => {
 			"--model",
 			"google/gemini-x",
 			"--tools",
-			"read,grep",
+			"read,grep,agent_send",
 			"--name",
 			"explore",
 			"--session-dir",
 			"/example/user/.pi/agent/subagent-sessions",
 		]);
+	});
+
+	it("keeps agent_send in every allowlist without duplicating it", () => {
+		const listed = makeAgent({ cwd: "/tmp", label: "x", tools: ["agent_send", "read"] }).fake.args;
+		assert.deepEqual(listed.slice(0, 2), ["--tools", "agent_send,read"]);
+		const revived = makeAgent({ cwd: "/tmp", label: "x", tools: ["read"], resumeSession: "/s.jsonl" }).fake.args;
+		assert.deepEqual(revived.slice(0, 2), ["--tools", "read,agent_send"]);
+		assert.ok(!makeAgent({ cwd: "/tmp", label: "x" }).fake.args.includes("--tools"));
 	});
 
 	it("passes thinking level through as --thinking", () => {
