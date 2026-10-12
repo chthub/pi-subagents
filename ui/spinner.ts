@@ -1,10 +1,9 @@
 /**
- * pi-ui — shared formatting primitives for pi extension UI.
+ * Internal UI layer — shared animation and duration formatting.
  *
  * Spinner (wall-clock driven frames) and duration formatting — used by
- * tool cards, widgets and notification surfaces across extensions.
- * (Text clipping / title sanitization live in width.ts; spinner.ts
- * re-exports them for back-compat.)
+ * tool cards, widgets and notification surfaces. Text clipping and title
+ * sanitization live in width.ts and are imported directly from there.
  */
 
 /** Spinner frame interval (80ms — matches Pi's native loader cadence).
@@ -56,7 +55,3 @@ export function durationMeta(
 	if (status === "processing") return `Elapsed ${formatDuration(Date.now() - startedAt)}`;
 	return `Took ${formatDuration((endedAt ?? Date.now()) - startedAt)}`;
 }
-
-// clipTail / safeTitle live in width.ts now — the width-safety family is
-// single-filed there; re-exported here so existing import paths keep working.
-export { clipTail, safeTitle } from "./width.js";

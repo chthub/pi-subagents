@@ -1,5 +1,5 @@
 /**
- * pi-ui — unified animation ticker.
+ * Internal UI layer — unified animation ticker.
  *
  * Problem: TUI rendering is event-driven (a component redraws when its
  * content changes), but a spinner needs clock-driven redraws at a steady
@@ -84,5 +84,5 @@ class Ticker {
 	}
 }
 
-/** Process-wide singleton — every pi-ui consumer shares one animation clock. */
+/** Process-wide singleton — internal UI components share one animation clock. */
 export const ticker = new Ticker();

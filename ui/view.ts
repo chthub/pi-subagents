@@ -1,15 +1,15 @@
 /**
- * pi-ui — data-driven tool views.
+ * Internal UI layer — data-driven tool views.
  *
  * Declarative tool rendering: a tool declares how its result data maps onto
- * the card (name/title/tail/meta/body); pi-ui builds the renderCall and
+ * the card (name/title/tail/meta/body); the internal UI layer builds renderCall and
  * renderResult from that declaration. The tool never touches rendering —
  * status (processing/success/error/stop) is derived from the framework
  * state, colors/quoting/folding live inside the card.
  *
  *   execute → structured data (in details)
  *   view    → how that data maps onto the card
- *   pi-ui   → everything else (renderers, folding, colors, status)
+ *   UI layer → everything else (renderers, folding, colors, status)
  */
 
 import {
@@ -192,7 +192,7 @@ function bodyRows<Args, Data>(
 
 /**
  * Build renderCall/renderResult from a declarative view. The tool provides
- * structured data (execute's details) and a view; pi-ui derives status,
+ * structured data (execute's details) and a view; the internal UI layer derives status,
  * assembles the card, and handles folding/colors/framework state.
  */
 export function createToolView<Args, Data>(

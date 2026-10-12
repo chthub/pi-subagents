@@ -1,5 +1,5 @@
 /**
- * pi-subagent — spawn isolated sub‑agent pi instances + in-tree messaging.
+ * pi-subagents — spawn isolated sub‑agent pi instances + in-tree messaging.
  *
  * Architecture:
  *   index.ts          — tool registration (agent_spawn / agent_stop / agent_send) + routing glue
@@ -17,8 +17,7 @@
  *   completion-inbox.ts — boundary-batched delivery, one wake for ready results
  *   types.ts          — shared tool-output / notification shapes
  *   views.ts          — tool card views (single source for the three cards)
- *   card.ts           — notification card wrappers (via pi-ui)
- *   render.ts         — notification card renderer (message surface)
+ *   render.ts         — notification card renderer + custom-message shell
  *   widget.ts         — bottom agent list (one clickable line per agent)
  *   roster.ts         — the conversation's agents, live and finished (rebuilt on resume)
  *   agent-view.ts     — full-screen view of one agent: transcript + side-chat editor

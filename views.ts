@@ -1,5 +1,5 @@
 /**
- * pi-subagent — tool card views (single source of truth).
+ * pi-subagents — tool card views (single source of truth).
  *
  * The three card templates (agent_spawn / agent_stop / agent_send) live here
  * so production (index.ts registration) and the dev preview (preview.ts)
@@ -130,7 +130,7 @@ export const spawnView = createToolView<Record<string, unknown>, SubagentDetails
 		}
 		// Nested-subtree summary (foreground cards): the whole descendant
 		// tree of this agent folded into one count set — the shared counter
-		// vocabulary (pi-ui counterParts; SPEC: single-display rule).
+		// vocabulary (internal UI layer counterParts; SPEC: single-display rule).
 		const n = d?.nested;
 		if (n && n.total > 0) {
 			parts.push(...counterParts(n).map((p) => p.text));

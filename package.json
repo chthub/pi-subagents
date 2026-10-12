@@ -2,7 +2,7 @@
   "name": "pi-subagents",
   "version": "0.1.0",
   "private": true,
-  "description": "Pi sub-agents: spawn/stop/send a tree of named, message-passing pi agents. Derived from @everyx/pi-subagent, with pi-ui inlined.",
+  "description": "A minimal, complete sub-agent framework for pi: three tools, isolated contexts, parallel execution, automatic results, resumable sessions, and native UI.",
   "keywords": [
     "pi-package",
     "pi",
@@ -26,10 +26,13 @@
   "files": [
     "*.ts",
     "ui/*.ts",
+    "!preview.ts",
+    "!ui/preview-runtime.ts",
     "skills/",
     "README.md",
     "README.zh.md",
     "SPEC.md",
+    "docs/",
     "LICENSE"
   ],
   "pi": {

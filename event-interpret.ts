@@ -1,5 +1,5 @@
 /**
- * pi-subagent — event interpretation (raw RpcEvent → AgentEvent).
+ * pi-subagents — event interpretation (raw RpcEvent → AgentEvent).
  *
  * The only place pi's rpc protocol vocabulary is mapped onto our domain
  * vocabulary. protocol.ts only classifies lines as response vs event; this

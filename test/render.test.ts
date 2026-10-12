@@ -66,7 +66,7 @@ test("notification header carries the status icon", () => {
 		theme,
 	);
 	assert.ok(renderText(ok, 120).includes('✓ Agent "research db schema" completed'), "completed icon + word");
-	// The result text must render in the card body (pi-ui message channel).
+	// The result text must render in the card body through the internal UI layer.
 	assert.ok(renderText(ok, 120).includes("found 5 tables"), "result text renders in the body");
 
 	const failed = renderNotification(

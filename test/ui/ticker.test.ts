@@ -1,5 +1,5 @@
 /**
- * Tests for the unified animation ticker (pi-ui).
+ * Tests for the internal UI layer's unified animation ticker.
  */
 
 import assert from "node:assert/strict";

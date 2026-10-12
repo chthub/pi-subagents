@@ -1,5 +1,5 @@
 /**
- * pi-subagent — model resolution.
+ * pi-subagents — model resolution.
  *
  * Resolve a user-provided model spec against the ModelRegistry.
  * Supported forms:

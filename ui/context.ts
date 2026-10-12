@@ -1,13 +1,13 @@
 /**
  * LLM context protection — the shared stash primitive.
  *
- * One semantic across every tool: the LLM sees a capped preview, and when
+ * Agent results use one contract: the LLM sees a capped preview, and when
  * content was cut the full text is stashed in /tmp so it's one `read` away.
  * Budget is pi-bash parity (2000 lines / 50KB, whichever hits first) via
  * pi's own truncateHead/truncateTail.
  *
- * This lives in pi-ui as a shared extension primitive (not TUI-specific);
- * both pi-subagent and pi-web-tools consume it.
+ * The internal UI layer uses this helper to protect model context;
+ * storage and truncation are independent of terminal rendering.
  */
 
 import { createHash } from "node:crypto";

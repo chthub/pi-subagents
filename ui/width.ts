@@ -1,5 +1,5 @@
 /**
- * Width safety — the single exit for pi-ui's self-rendered rows.
+ * Internal UI layer — width safety for structural rows.
  *
  * pi crashes on any rendered line wider than the terminal (visibleWidth is
  * its crash metric), and newlines collapse to zero width — so flattening,

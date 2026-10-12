@@ -1,5 +1,5 @@
 /**
- * pi-ui — StatusWidget: a foreground indicator for background work.
+ * Internal UI layer — StatusWidget: a foreground indicator for background work.
  *
  * Data-driven: consumers add pure-data items (id/title/status/rows); the
  * widget renders everything (spinner, elapsed, row styling). No render
@@ -44,7 +44,7 @@ export interface CounterPart {
 
 /** The shared counter vocabulary (`done n/total · n running · …`) — the
  *  widget title and the card nested-subtree meta must speak the same words
- *  (pi-subagent SPEC: single-display rule). Consumers render tone per surface
+ *  (pi-subagents SPEC: single-display rule). Consumers render tone per surface
  *  (widget colors failed; the card meta stays dim). */
 export function counterParts(c: CounterCounts): CounterPart[] {
 	const parts: CounterPart[] = [{ text: `done ${c.done}/${c.total}`, tone: "normal" }];

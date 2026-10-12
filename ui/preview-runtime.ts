@@ -1,10 +1,9 @@
 /**
- * pi-ui — dev-only storybook runtime for extension previews.
+ * Internal UI layer — dev-only storybook runtime for agent previews.
  *
- * Never imported by production code. Both extension previews (pi-subagent,
- * pi-web-tools) render through this module so the theme-loading hack, the
- * framework-shell simulation, and line rendering have exactly one
- * implementation — storybooks stay honest mirrors of the real cards.
+ * Never imported by production code. preview.ts uses this module for theme
+ * loading, framework-shell simulation, and line rendering, so previews
+ * stay honest mirrors of the real cards.
  *
  * The theme is loaded by deep-importing pi's interactive theme module from
  * node_modules (it is not part of any public export surface — that is why

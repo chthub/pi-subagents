@@ -1,5 +1,5 @@
 /**
- * pi-subagent — nested-subtree counters for one foreground card.
+ * pi-subagents — nested-subtree counters for one foreground card.
  *
  * Every descendant spawn of a foreground card's agent — at any depth,
  * foreground or background — folds into one count set here, fed by tree

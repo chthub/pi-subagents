@@ -1,5 +1,5 @@
 /**
- * pi-subagent — live output routing: where a running agent's output goes.
+ * pi-subagents — live output routing: where a running agent's output goes.
  *
  * One rule, and it does not depend on how the agent was spawned:
  *   - the root widget hears about every update. It tracks background rows AND

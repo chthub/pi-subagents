@@ -1,5 +1,5 @@
 /**
- * pi-subagent — shared protocol types.
+ * pi-subagents — shared protocol types.
  *
  * These are the domain types that flow between the agent lifecycle
  * (agent-process.ts → index.ts) and the TUI rendering (render.ts). They

@@ -1,5 +1,5 @@
 /**
- * pi-subagent — subtree display: where a child's telemetry lands.
+ * pi-subagents — subtree display: where a child's telemetry lands.
  *
  * The single-display rule (SPEC) as one module. Given the anchor facts (am I the
  * root? is this child foreground? is my card still open?), every tree

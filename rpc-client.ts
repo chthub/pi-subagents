@@ -1,5 +1,5 @@
 /**
- * pi-subagent — thin stateful RPC client.
+ * pi-subagents — thin stateful RPC client.
  *
  * Spawns a `pi --mode rpc` child and speaks the JSONL protocol over
  * stdin/stdout. This class owns only transport concerns:

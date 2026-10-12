@@ -1,5 +1,5 @@
 /**
- * pi-subagent — completion notification payload construction.
+ * pi-subagents — completion notification payload construction.
  *
  * One module owns every rule about what a completion notification says and
  * to whom: the LLM-visible JSON (capped, stash-marked), the user-side
@@ -27,8 +27,8 @@ export function truncateForContext(text: string): string {
 }
 
 /**
- * When an output exceeds the context cap, stash the full text (shared
- * primitive in pi-ui/context.ts) and return the LLM-visible marker embedded
+ * When an output exceeds the context cap, stash the full text through
+ * ui/context.ts and return the LLM-visible marker embedded
  * in the result: the model reads the truncated preview and knows the full
  * output is one `read` away. Returns the marker when truncated, "" otherwise.
  */

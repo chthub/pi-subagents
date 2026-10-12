@@ -1,6 +1,6 @@
 /**
  * expandHintText — the expand-hint contract for header-only folded cards
- * (pi-ui single source; consumed by pi-web-tools).
+ * provided by the internal UI layer.
  *
  * The judge is "the card has expandable content" — folding hides every byte,
  * truncated or not — not the LLM-visible truncation bit. The bound branch is

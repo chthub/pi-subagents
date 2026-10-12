@@ -1,5 +1,5 @@
 /**
- * pi-subagent — short human-name ids for agents.
+ * pi-subagents — short human-name ids for agents.
  *
  * Agent ids are LLM-facing references: they must look like names (not
  * machine codes), be memorable, and cost as few tokens as reasonable.

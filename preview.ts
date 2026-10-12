@@ -42,7 +42,7 @@ initTheme(themeName);
 // node_modules physically (tsx's resolver enforces exports even for
 // require.resolve) and import the file by absolute URL, which bypasses the
 // exports map entirely.
-// Dev storybook runtime — shared across extension previews (one implementation).
+// Internal preview runtime — theme loading and framework-shell simulation.
 const { theme, renderLines, toolShell } = await createPreviewRuntime();
 
 /**

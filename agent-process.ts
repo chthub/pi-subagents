@@ -1,5 +1,5 @@
 /**
- * pi-subagent — AgentProcess.
+ * pi-subagents — AgentProcess.
  *
  * One resident `pi --mode rpc` child, wrapped behind Agent-tool semantics.
  * The parent extension holds N AgentProcess instances (foreground: one at a

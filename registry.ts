@@ -1,23 +1,19 @@
 /**
- * pi-subagent — AgentRegistry.
+ * pi-subagents — AgentRegistry.
  *
- * Owns the set of running background agents and the "what happens when an
- * agent finishes" policy — bookkeeping that used to live inline in index.ts
- * tool executes (registry map + widget row + child process kept in sync in
- * three call sites: agent_spawn.execute, agent_stop.execute, session_shutdown).
+ * Owns child lifecycle, completion policy, and routing. Keeps registry
+ * membership, widget rows, and child processes in sync.
  *
  * The registry depends on narrow seams — a notify callback and a widget
  * surface — so the completion policy is unit-testable without a pi API or a
  * TUI. AgentProcess satisfies RegisteredAgent structurally; index.ts adapts
  * the TUI widget via WidgetSurface.
  *
- * Policy (mirroring the previous inline wiring):
- *   - agent_stop is a deliberate user action → no notification (B6).
- *   - Timeout/hard-stop completions still notify with status "stopped" (B5).
- *   - Every terminal path cleans up exactly once (remove is idempotent).
- * Ordering note: the original wiring stopped the child *before* notifying on
- * the spawn-failure path (D15) but *after* notifying on the completion path;
- * complete() unifies both to notify → cleanup — no observable difference.
+ * Policy:
+ *   - agent_stop is deliberate control → no new completion notification.
+ *   - Timeout/hard-stop completions still notify with status "stopped".
+ *   - Completed persistent agents remain registered and idle.
+ *   - Other completions notify before cleanup; removal is idempotent.
  */
 
 import type { AgentCompletion } from "./agent-process.js";
@@ -160,8 +156,8 @@ export class AgentRegistry {
 	/** agent_stop path: graceful stop + removal (no notification).
 	 *  Returns whether an agent was actually stopped (false when it finished
 	 *  between lookup and removal). A rejecting stop() propagates — the
-	 *  caller (agent_stop.execute) surfaces it as a tool error, matching
-	 *  the original wiring. `result` is the row's end state: a failed
+	 *  caller (agent_stop.execute) surfaces it as a tool error.
+	 *  `result` is the row's end state: a failed
 	 *  follow-up turn is cleaned up here too and must not read "stopped". */
 	async stopAndRemove(agentId: string, result: WidgetResult = "stopped"): Promise<boolean> {
 		const agent = this.agents.get(agentId);

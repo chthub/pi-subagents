@@ -1,6 +1,38 @@
-# pi-subagent Specification
+# pi-subagents Specification
 
-> Shared design principles (Pi Native, LLM + Token Friendly, primitives rather than solutions, minimalism) and visual conventions live in [`docs/upstream/root-SPEC.md`](docs/upstream/root-SPEC.md). This file records sub-agent-specific design.
+A minimal, complete sub-agent framework for pi. This file is the design contract; [docs/ui.md](docs/ui.md) records the internal UI module boundaries.
+
+## Design principles
+
+### Minimal interface, complete lifecycle
+
+Three operations — spawn, send, stop — cover delegation, communication, follow-ups, and cancellation. The framework owns process lifecycle, automatic result delivery, session persistence and recovery, and native inspection. Minimalism reduces the concepts callers must learn; it does not omit the machinery needed to finish and revisit work.
+
+Provide mechanisms for callers to compose, not a workflow engine. Do not hard-code roles, workflow templates, automatic retries, result postprocessing, or scheduling. Coordination guidance belongs in the on-demand skill, not tool implementations.
+
+### Pi-native integration
+
+- Reuse pi's RPC, session storage, model configuration, and native rendering components rather than introducing another harness or session format.
+- Follow built-in tool naming and schema conventions. Keep operational descriptions separate from coordination instructions.
+- Cards, notifications, and widgets use pi's typography, colors, folding, and status conventions, without promotional branding or decorative emoji.
+- Keep execution independent of rendering so non-interactive modes remain functional.
+
+### Context economy and explicit policy
+
+- Model-facing `content` contains only necessary data; display-only titles, usage, and metadata live in `details`.
+- Agent tools activate on demand. Advertise the coordination skill without loading its full body into every context.
+- Push background results automatically; do not add polling or result-query tools. Report each event once: a spawn failure returned as a tool error needs no extra completion notification.
+- No hidden token ceiling, default timeout, or concurrency cap. Limits such as `timeoutMs` and nesting depth are explicit caller choices.
+- Keep protocol serialization, parsing, and model resolution independently testable pure boundaries.
+
+### Visual and implementation conventions
+
+- Place status icons first and retain the card wrapper through pending, success, and failure.
+- Separate metadata with `·`; time belongs in header metadata, paths in the footer. Align body content to the card's left edge, with blank lines between sections.
+- Collapsed output uses a preview and expansion hint; expanded output retains the complete rendering source. Cap model-facing text at bash's output limits, not the UI source.
+- Missing output uses a dim parenthesized placeholder. Show meaningful activity as execution changes state; long silence without feedback is a defect. Use `working…` only when no more specific operation is available.
+- Development previews must reflect actual behavior. Do not add third-party UI libraries.
+- Use `StringEnum` for parameter enums for Gemini compatibility. For blank lines, use `Text("\n" + content)`, not `Text("")`. Never call `context.invalidate()` synchronously from a render function.
 
 ## Problem statement
 
@@ -101,23 +133,24 @@ Found five files handling authentication: src/auth/*.ts …
 session: /path/to/session.jsonl
 ```
 
-- The card name is `Agent`, not `agent_spawn`: this message reports the child's completion rather than a tool call (#31). Status uses an icon and word: completed is muted, failed uses the error color, and stopped uses the warning color. Persistent completion adds `idle` to metadata.
+- The card name is `Agent`, not `agent_spawn`: this message reports the child's completion rather than a tool call. Status uses an icon and word: completed is muted, failed uses the error color, and stopped uses the warning color. Persistent completion adds `idle` to metadata.
 - Background color is `customMessageBg`, Pi's injected-message color. Tool backgrounds remain reserved for actual tool cards. A custom renderer owns its styling rather than receiving Pi's default wrapper.
 - Rendering data lives in `details`, outside the model context.
 
-### Agents status widget (aboveEditor)
+### Conversation agent list (belowEditor)
 
 ```text
-  ● Agents (done 1/3 · 2 running · 1 idle)
-  ⠋ @max — Check CI configuration (42.0s)
-  ‖ @zoe — Resident research agent
+  ⠋ @max  Check CI configuration   42s  bash: npm test
+  ‖ @zoe  Resident research agent  idle
+  ✓ @kai  Inspect auth module     27s
+  Click to open · /agents
 ```
 
-- Background and persistent foreground children retain addressable display entries; ordinary foreground output is already inline.
-- The status widget removes completed/stopped nonresident rows. Persistent completion retains an idle row (`‖`), outside active progress counts, until stopped.
-- Header metadata combines progress (`done n/total`), live counts (`n running`, `n idle`), and failure/stopped counts. An empty widget disappears; counts reset for the next batch.
-- When rows exceed the display budget, prioritize active/error rows and collapse the remaining entries to counts.
-- Each row includes the latest tool, thinking, or text excerpt. Tail clipping uses the terminal width supplied to rendering.
+- The roster retains running, idle, done, failed, and stopped agents for this conversation. A finished process does not remove its saved-session entry.
+- Each row shows the agent's ID, task label, elapsed time or status, and latest activity while active. Persistent completion changes the row to idle (`‖`); terminal entries remain available for review and revival.
+- When rows exceed the display budget, prioritize live agents, then the most recently finished, preserving spawn order. The hint shows the number of hidden entries and `/agents`.
+- Clicking a row or invoking `/agents` opens the native agent view. An empty roster hides the list. Resume and reload reconstruct it from the current session branch.
+- Layout uses the terminal width supplied to rendering and pi's visible-width helpers.
 
 ## Implementation decisions
 
@@ -135,13 +168,12 @@ tree-display.ts     — subtree routing to cards, widgets, or ancestors
 registry.ts         — child lifecycle, completion policy, and delivery
 model.ts            — model resolution
 types.ts            — shared event and result types
-render.ts           — notification rendering through shared UI primitives
+render.ts           — notification payload rendering and card shell
 widget.ts           — conversation agent list
 name-gen.ts         — short agent IDs
 spawn-session.ts    — foreground/background/persistent lifecycle
 nested-fold.ts      — foreground subtree counters
 views.ts            — the three tool-card views
-card.ts             — notification-card wrappers
 preview.ts          — development-only storybook
 ```
 
@@ -253,9 +285,9 @@ Children can only spawn foreground work, so no detached edge appears inside thei
 
 A persistent foreground child may outlive its completed tool card. Once execution settles, `cardClosed` prevents new descendant events from folding into the frozen card; later activity goes to the widget.
 
-**Removing a parent removes its display subtree.** Process exit ends descendant telemetry, so an add event carries its direct `parent` ID throughout forwarding. `AgentWidget` recursively marks remaining descendants stopped when their parent is removed. Previously those descendants could remain as permanent spinners after their processes had exited.
+**Removing a parent ends its live display subtree.** Process exit ends descendant telemetry, so an add event carries its direct `parent` ID throughout forwarding. `AgentWidget` recursively marks remaining live descendants stopped when their parent is removed, retaining roster entries for review. Previously those descendants could remain as permanent spinners after their processes had exited.
 
-**Shared vocabulary:** `counterParts` supplies widget and card counters; `agentTitle` supplies `@id — label`; shared card helpers supply status icons. Consumers choose status tones without duplicating the vocabulary.
+**Shared vocabulary:** `counterParts` supplies foreground subtree counters; `agentTitle` supplies `@id — label`; shared card helpers supply status icons. Consumers choose status tones without duplicating the vocabulary.
 
 ### Foreground-only child spawning; persistent residency at every level (2026-08-22)
 
@@ -263,10 +295,10 @@ A child's lifetime is bounded by its parent's foreground wait. Detached descenda
 
 Persistent residency means the process remains available after a completed turn, only until its host session ends. Root residents close with their root host; nested residents close with their parent. This supports repeated `agent_send` calls within the parent's lifetime without promising independent survival.
 
-### Upstream isError workaround
+### Pi tool-result error compatibility
 
 - Symptom: an extension returning `{isError: true}` can still receive a successful tool-card background.
-- Cause: the upstream normal-return path in `executePreparedToolCall` sets `isError: false`; thrown failures follow a different path. The historical upstream issue is #5209.
+- Cause: pi's normal-return path in `executePreparedToolCall` sets `isError: false`; thrown failures follow a different path. This is a host compatibility concern, not a separate agent protocol.
 - Workaround: error results carry `details.error`. A `tool_result` hook restores `isError: true` through the supported result override while preserving details. Throwing instead would lose those details.
 
 ## Outside this scope

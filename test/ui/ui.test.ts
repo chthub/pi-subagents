@@ -1,12 +1,13 @@
 /**
- * Tests for pi-ui shared primitives (spinner/card/format).
+ * Tests for internal UI layer primitives (spinner/card/format).
  */
 
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { renderHeader } from "../../ui/card.js";
-import { clipTail, formatDuration, Spinner, safeTitle } from "../../ui/spinner.js";
+import { formatDuration, Spinner } from "../../ui/spinner.js";
+import { clipTail, safeTitle } from "../../ui/width.js";
 
 describe("spinner", () => {
 	it("returns a frame immediately and stays within the frame set", () => {

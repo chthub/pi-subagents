@@ -1,5 +1,5 @@
 /**
- * pi-subagent — RPC JSONL protocol (pure functions).
+ * pi-subagents — RPC JSONL protocol (pure functions).
  *
  * Framing matches pi's own rpc mode (`dist/modes/rpc/jsonl.js`): one JSON
  * object per line, split on `\n` only — never on U+2028/U+2029.

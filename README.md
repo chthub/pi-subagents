@@ -2,9 +2,11 @@
 
 [English](README.md) | [Chinese](README.zh.md)
 
-> Derived from [`@everyx/pi-subagent`](https://github.com/everyx/pi-extensions/tree/master/packages/pi-subagent) 1.3.7 (everyx/pi-extensions@3b455f1, MIT). The `@everyx/pi-ui` modules it used are inlined under `ui/`, so this package has no runtime dependency besides pi itself. Targets pi 1.1.0.
+**A minimal, complete sub-agent framework for pi.**
 
-**Pi agents that work together — three primitives, a tree of named agents, no noise.**
+Three operations — spawn, send, stop — backed by isolated contexts, parallel execution, automatic results, resumable sessions, and a native agent view. Complete lifecycle, minimal interface: you define the work; the framework handles the agents.
+
+Built as a pi extension, with no additional runtime dependencies beyond pi's host-provided packages. Tested against pi 1.1.0.
 
 ```
 You:  Research this project's database schema for me
@@ -15,7 +17,7 @@ You:  Research this project's database schema for me
 
 ## Why?
 
-Pi has no built‑in sub‑agents. So heavy, parallel, or context‑heavy work crowds into your one window. pi‑subagent moves that work to a child pi: the noise stays there, only the answer comes back.
+Pi has no built‑in sub‑agents. So heavy, parallel, or context‑heavy work crowds into your one window. pi-subagents moves that work to a child pi: the noise stays there, only the answer comes back.
 
 ## Features
 
@@ -33,21 +35,16 @@ Pi has no built‑in sub‑agents. So heavy, parallel, or context‑heavy work c
   - **Notification** — the LLM sees only minimal structured data; decoration (label, usage) stays in the render layer.
   - **Results** — tail‑truncated (2000 lines / 50KB); expand any card for the full transcript.
 
-## Comparison with similar extensions
+## Design philosophy
 
-pi-subagent, [`@tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagents), and [`pi-subagents`](https://github.com/nicobailon/pi-subagents) all give pi isolated, parallel sub‑agents. They sit on a *primitives → framework* spectrum, and pi-subagent sits at the minimal end: three primitives, no predefined roles, no harness — you compose. What that buys you is in [Features](#features); where the trade‑offs fall is below.
+Pi is a minimal, extensible agent harness you can make your own. pi-subagents follows that approach: provide a complete delegation mechanism without prescribing how you work.
 
-| | **pi-subagent** | **@tintinweb/pi-subagents** | **pi-subagents (nicobailon)** |
-|---|---|---|---|
-| Design stance | Minimal primitives | Full framework | Full framework |
-| Tool surface | `agent_spawn` / `agent_stop` / `agent_send` (3) | Claude Code‑style `Agent` / `get_subagent_result` / `steer_subagent` | `subagent` + management/status/control families |
-| Predefined roles | None — defined by prompt | Custom types via `.pi/agents/*.md` (frontmatter) | 8 built‑in (scout / reviewer / worker / oracle…) |
-| Parallelism | Uncap (one process per agent) | Queued, default 4 concurrent | spawn / turn / usage budgets |
-| Default limits | None (optional `timeoutMs`) | Graceful turn limits | turn / usage budgets |
-| Observability | pi‑native cards + widget + `pi --session` | FleetView + conversation viewer | FleetView inspector + fleet |
-| Nesting | Default off; configurable `maxDepth` | Opt‑in, depth cap | Recursion guard |
-| Extras | Token economy, minimal runtime deps, no orphans on reload/crash | Memory, worktree isolation, schedule, cross‑extension RPC, event bus | Missions/scheduling, watchdog, worktree, intercom, chain orchestration |
-| Best for | Owning your own composition | A turnkey sub‑agent system | Built‑in roles + workflow orchestration |
+- **Small surface, complete lifecycle.** `agent_spawn`, `agent_send`, and `agent_stop` cover delegation, follow-ups, and cancellation. Results arrive automatically; sessions persist; agents are visible and inspectable.
+- **Mechanism, not a workflow engine.** No preset roles, scheduler, or enforced orchestration. Define tasks through prompts and compose the tools as needed. Optional coordination guidance lives in a skill, not runtime policy.
+- **Native rather than parallel infrastructure.** Children are real pi processes. RPC, sessions, rendering, and model configuration reuse pi's capabilities instead of introducing another harness.
+- **Pay only for what you use.** Agent tools activate on demand; detailed guidance is read only when needed. UI metadata stays out of model context. Nesting and timeouts are explicit choices, not hidden defaults.
+
+Minimal means fewer concepts to learn, not an incomplete agent lifecycle. See [SPEC.md](SPEC.md) for the design contract and [docs/ui.md](docs/ui.md) for UI boundaries.
 
 ## Install
 
@@ -71,7 +68,7 @@ Restart pi, then tell it "ask a sub‑agent to…".
 Ask a sub‑agent to analyze the auth logic under src/
 ```
 
-Pi calls `agent_spawn` (foreground), the child runs in isolation, and the result comes back inline.
+In an interactive session, `agent_spawn` runs in the background by default: the child works in isolation and its final reply returns automatically. Request `run_in_background: false` when you want the tool call to wait and return the answer inline.
 
 ### Run several in parallel
 
@@ -79,7 +76,7 @@ Pi calls `agent_spawn` (foreground), the child runs in isolation, and the result
 Spawn three sub‑agents to look at the auth module, the database layer, and the API routes
 ```
 
-Pi issues three `agent_spawn` calls in one block — foreground calls run in parallel, and each call's result carries that agent's final output (no polling, no extra result tool).
+Pi issues three `agent_spawn` calls in one block. Each child works independently; ready background results return automatically at the next delivery boundary. Foreground calls also run in parallel, returning their answers inline. No polling or extra result tool.
 
 ### Message or stop
 
@@ -204,7 +201,7 @@ Sub‑agent won't see any other tools. Read‑only exploration with a cheaper mo
 
 Every sub‑agent is a resident `pi --mode rpc` child with a persisted session:
 
-- **Foreground** — `agent_spawn` waits for the child to settle, fetches the final output, then closes stdin (graceful shutdown).
+- **Foreground** — `agent_spawn` waits for the child to settle and returns its final output inline. Nonpersistent children then close; persistent children stay available for follow-ups.
 - **Background results** — `agent_spawn` returns immediately. Each child settlement queues a `subagent-notification`. While the parent is busy, all ready results enter together after the current response and tool batch, before the next model request—the steering delivery point, implemented through `turn_end` with `agent_before_settle` as a fallback. Delivery does not interrupt generation or tools, use the follow-up queue, or depend on the global steering queue mode. Idle delivery collects the ready batch for one event-loop tick, keeps separate cards, and starts only one model run. It never waits for unfinished children. This prevents queue-induced delay, not reports becoming outdated after subsequent file changes.
 - **Send/stop** — `agent_send` uses steering in both directions (after the current response/tool batch, before the next request); idle children wake. `agent_stop` closes stdin for a graceful shutdown, without a new completion notification; already queued results remain deliverable.
 - **Resident idle** — by default the child stays resident after completion (idle, zero tokens). A later `agent_send` wakes it to continue the same context; `agent_stop` tears it down. The completion notification and list row carry the `idle` marker.
@@ -227,7 +224,24 @@ The mechanism is a pure point-to-point deliverer: `agent_send` delivers to a dir
 - **One process per child.** Foreground and background are the same resident rpc child. Many children = many processes — spawn with care.
 - **One-shot results.** A process-settlement `completion_id` deduplicates each event within the live session. Different turns of the same child are preserved, even with identical text. After a parent abort/error, results are saved without requesting a restart; they remain available for the next accepted run. If the main session dies before delivery, the result survives in the child's session file (`pi --session <path>`).
 - **Resident agents cost memory.** Each idle agent is a pi process (~180 MB RSS with a typical extension set) until the session ends or `agent_stop`. Pass `persistent: false` for one-off work; follow-ups still work through resume.
+- **Recovery depends on the saved session.** Resume restores conversation context, not an interrupted tool's in-memory state or execution position.
 
 ## Cleanup
 
-When pi exits, sub‑agents (running or idle) get a graceful stdin‑EOF shutdown. Sessions stay on disk for attach/replay — nothing is killed, nothing deleted.
+When pi exits, sub‑agents (running or idle) get a graceful stdin‑EOF shutdown. Sessions stay on disk for attach/replay; cleanup does not delete them.
+
+## Development
+
+Runtime modules live at the package root; `ui/` contains internal rendering primitives, `skills/` contains on-demand coordination guidance, and `test/` mirrors those boundaries. [SPEC.md](SPEC.md) is the design contract; [docs/ui.md](docs/ui.md) describes the UI layer. `preview.ts` and `ui/preview-runtime.ts` are development-only and excluded from the package tarball.
+
+```bash
+npm install
+npm test
+npm run typecheck
+npm run check
+npm run preview
+```
+
+## License
+
+MIT. Copyright notices and third-party attribution are retained in [LICENSE](LICENSE).

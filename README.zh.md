@@ -2,9 +2,11 @@
 
 [English](README.md) | [中文](README.zh.md)
 
-> 派生自 [`@everyx/pi-subagent`](https://github.com/everyx/pi-extensions/tree/master/packages/pi-subagent) 1.3.7（everyx/pi-extensions@3b455f1，MIT）。原来依赖的 `@everyx/pi-ui` 已内联到 `ui/`，除 pi 本身外没有运行时依赖。目标版本 pi 1.1.0。
+**为 pi 提供极简、完整的子代理框架。**
 
-**Pi 的协作式子代理——三原语、有名有姓、互通消息，调度权在你。**
+三个操作——启动、发消息、停止——配上独立上下文、并行执行、自动结果交付、可恢复会话和原生子代理窗口。生命周期完整，操作接口极简：你定义任务，框架管理代理。
+
+作为 pi 扩展运行，除 pi 宿主提供的包外，没有额外运行时依赖。已在 pi 1.1.0 上测试。
 
 ```
 你： 调研一下这个项目的数据库 schema
@@ -15,7 +17,7 @@
 
 ## 为什么需要它？
 
-Pi 没有内置 sub-agent。于是重活、并行的活、吃上下文的活，全都挤进你那一个窗口。pi-subagent 把活交给子 pi：噪音留在那边，只有答案回来。
+Pi 没有内置 sub-agent。于是重活、并行的活、吃上下文的活，全都挤进你那一个窗口。pi-subagents 把活交给子 pi：噪音留在那边，只有答案回来。
 
 ## 特性
 
@@ -33,21 +35,16 @@ Pi 没有内置 sub-agent。于是重活、并行的活、吃上下文的活，�
   - **通知** — LLM 只看到最小结构化数据；装饰（label、用量）留在渲染层，永不进入 LLM 上下文。
   - **结果** — 自动截尾（2000 行 / 50KB）；展开任何卡片仍见全量。
 
-## 与同类插件的对比
+## 设计理念
 
-pi-subagent 与 [`@tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagents)、[`pi-subagents`](https://github.com/nicobailon/pi-subagents) 都能为 pi 提供隔离并行的子 agent。它们落在 *原语 → 框架* 的光谱上，pi-subagent 刻意站在最极简的**原语**这一端：三个原语、无预定义角色、无框架——组合由你。具体能力见[特性](#特性)；取舍落在哪里，见下表与两个最流行的同类插件对照。
+Pi 是一个极简、可扩展、由你定制的代理运行框架。pi-subagents 延续这个思路：提供完整的委派机制，不替你规定工作方式。
 
-| | **pi-subagent** | **@tintinweb/pi-subagents** | **pi-subagents (nicobailon)** |
-|---|---|---|---|
-| 设计姿态 | 最小原语 | 全功能框架 | 全功能框架 |
-| 工具面 | `agent_spawn` / `agent_stop` / `agent_send`（3 个） | Claude Code 风格 `Agent` / `get_subagent_result` / `steer_subagent` | `subagent` + 管理/状态/控制工具族 |
-| 预定义角色 | 无——由 prompt 定义 | 自定义类型 `.pi/agents/*.md`（frontmatter） | 8 个内置（scout / reviewer / worker / oracle…） |
-| 并行 | 无并发上限（一 agent 一进程） | 队列，默认并发 4 | 有 spawn / turn / usage budget |
-| 默认限制 | 无（可选 `timeoutMs`） | graceful turn limits | turn / usage budget |
-| 可观测性 | pi 原生卡片 + widget + `pi --session` | FleetView + conversation viewer | FleetView inspector + fleet |
-| 嵌套 | 默认关闭；可配置 `maxDepth` | opt‑in、有深度上限 | recursion guard |
-| 附加能力 | token 经济、零运行时依赖、reload/崩溃零孤儿 | memory、worktree 隔离、定时任务、跨扩展 RPC、事件总线 | missions/定时、watchdog、worktree、intercom、chain 编排 |
-| 适合 | 自己掌控组合 | 开箱即用的完整子 agent 系统 | 内置角色 + 工作流编排 |
+- **接口小，生命周期完整。** `agent_spawn`、`agent_send`、`agent_stop` 覆盖委派、追问和取消。结果自动送回，会话持久保存，代理可见、可查看。
+- **提供机制，不做工作流引擎。** 不预设角色，不内置调度器，不强制编排。通过 prompt 定义任务，按需组合工具。协调建议放在可选 skill 中，而非运行时策略里。
+- **复用 pi，而非另造一套基础设施。** 子代理是真正的 pi 进程。RPC、会话、渲染和模型配置沿用 pi 的能力，不引入另一套代理运行框架。
+- **不用就不承担额外负担。** 代理工具按需启用，详细指导按需读取；UI 元数据不占模型上下文。嵌套和超时由你明确选择，不设隐藏默认限制。
+
+极简是减少需要理解的概念，不是省掉代理生命周期。设计约定见 [SPEC.md](SPEC.md)，UI 层边界见 [docs/ui.md](docs/ui.md)。
 
 ## 安装
 
@@ -71,7 +68,7 @@ pi install git:github.com/chthub/pi-subagents
 让一个子 agent 分析 src/ 下的认证逻辑
 ```
 
-Pi 调用 `agent_spawn`（前台），子 agent 隔离运行，结果内联返回。
+交互会话中，`agent_spawn` 默认后台运行：子代理在独立上下文里工作，最终回复自动送回。需要工具调用等待并内联返回答案时，指定 `run_in_background: false`。
 
 ### 后台并行跑多个
 
@@ -79,7 +76,7 @@ Pi 调用 `agent_spawn`（前台），子 agent 隔离运行，结果内联返�
 同时起三个子 agent 分别看 auth 模块、数据库层和 API 路由
 ```
 
-Pi 在同一块里发三次 `agent_spawn`——前台调用并行执行，每次调用的结果携带对应 agent 的最终输出（无需轮询、无需额外的取结果工具）。
+Pi 在同一块里发三次 `agent_spawn`。子代理各自独立工作，后台就绪结果在下一个交付边界自动送回；前台调用同样并行执行，答案内联返回。无需轮询，也不需要额外的取结果工具。
 
 ### 发消息或停止
 
@@ -204,10 +201,11 @@ Pi 调用 `agent_send` 向运行中的 agent 注入 steering（当前模型响�
 
 每个 sub-agent 都是带持久化 session 的常驻 `pi --mode rpc` 子进程：
 
-- **前台** — `agent_spawn` 等待子进程 settled，取最终输出，然后关闭 stdin（优雅退出）。
+- **前台** — `agent_spawn` 等待子进程 settled，内联返回最终输出。非常驻子代理随后退出，常驻子代理保留以供追问。
 - **后台结果** — `agent_spawn` 立即返回；子代理 settled 后，结果进入会话级收件箱。主代理忙碌时，所有就绪结果在当前回复及工具批次结束后、下一次模型调用前一起送达，也就是 steer 的交付时机；通过 `turn_end` 实现，`agent_before_settle` 兜底。不打断生成或工具，不进入 follow-up 队列，不依赖全局 steering 队列的逐条／全部消费设置。空闲时只合并一个事件循环 tick 内已就绪的结果，保留独立卡片、只启动一次模型处理，不等待尚未完成的子代理。这防止排队造成的延迟，不保证报告在后续文件修改后仍然代表最新状态。
 - **发消息/停止** — `agent_send` 双向均用 steering（当前响应及工具批次结束后、下一次模型调用前），空闲子代理会被唤醒；`agent_stop` 关闭 stdin 优雅退出，不新增完成通知，但不删除已排队的有效结果。
-- **Persistent idle** — `persistent: true` 时子进程完成后驻留 idle（零 token）；之后 `agent_send` 可唤醒继续同一上下文，`agent_stop` 结束。完成通知与 widget 行带 `idle` 标记。
+- **常驻空闲** — 子代理默认常驻，完成后保持 idle（零 token）；之后 `agent_send` 可唤醒继续同一上下文，`agent_stop` 结束。完成通知与 widget 行带 `idle` 标记。
+- **恢复** — 向进程已退出的直接子代理发送 `agent_send`，会通过 `pi --mode rpc --session <路径>` 恢复保存的会话，以新消息开始下一轮；回答以通知送回。
 - **提问与交付** — 每个子任务末尾说明：缺信息时暂停工作，以问题结束本轮回复，等待父代理回答；完成后直接返回交付，结果自动回传，不额外发送一份完成报告。
 - **Attach / 复盘** — sub-agent 会话存储在 `<agent 目录>/subagent-sessions/`（见[配置](#配置)）。在主会话里找到 session 路径（agent_spawn 调用结果或完成通知卡片），执行 `pi --session <path>`——通知里也带 path，直接问 LLM 也行。
 - **Graceful turn limits（默认不限，opt-in）** — 不设隐藏 deadline：子 agent 一直跑到完成或被停，除非你传 `timeoutMs`。不做 token 限制——用量仅通知卡统计。
@@ -225,8 +223,25 @@ Pi 调用 `agent_send` 向运行中的 agent 注入 steering（当前模型响�
 - **Headless 下子 agent 随宿主退出**（`pi -p`）。主进程在响应结束时退出，后台子 agent 经 stdin EOF 被清理——从不留孤儿。后台流程（等通知、发消息、stop）面向常驻的 TUI 会话。
 - **一子 agent 一进程。** 前台后台同是常驻 rpc 子进程。开多了 = 进程多了——请节制。
 - **结果一次性投递。** 按进程及 settlement 的 `completion_id` 在当前运行会话内去重。同一代理不同轮次均保留，即使文本相同。主代理中断或报错后，结果只保存、不强行重启模型，供下一轮使用；若主会话先崩，结果仍在子代理 session 文件里（`pi --session <path>`）。
-- **恢复依赖保存的会话。** `agent_send` 可从会话文件恢复已退出的直接子代理；`agent_stop` 只针对仍存活的进程。恢复的是对话上下文，不是被中断工具的内存或执行位置。
+- **常驻代理占用内存。** 每个空闲代理仍是一个 pi 进程（典型扩展配置下约 180 MB RSS），直到主会话结束或被 `agent_stop`。一次性任务可设 `persistent: false`，之后仍能从会话恢复追问。
+- **恢复依赖保存的会话。** 恢复的是对话上下文，不是被中断工具的内存或执行位置。
 
 ## 清理
 
-pi 退出时，子 agent（运行中或 idle）都收到优雅的 stdin-EOF 关闭。session 留在磁盘供 attach/复盘——不杀进程、不删文件。
+pi 退出时，子 agent（运行中或 idle）都收到优雅的 stdin-EOF 关闭。session 留在磁盘供 attach/复盘；清理不会删除会话文件。
+
+## 开发
+
+运行时模块位于包根目录；`ui/` 放内部渲染组件，`skills/` 放按需读取的协调指导，`test/` 按这些边界组织测试。[SPEC.md](SPEC.md) 是设计约定，[docs/ui.md](docs/ui.md) 描述 UI 层。`preview.ts` 和 `ui/preview-runtime.ts` 仅供开发预览，不进入打包产物。
+
+```bash
+npm install
+npm test
+npm run typecheck
+npm run check
+npm run preview
+```
+
+## 许可证
+
+MIT。版权声明和第三方来源说明保留在 [LICENSE](LICENSE)。

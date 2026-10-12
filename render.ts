@@ -1,16 +1,38 @@
 /**
- * pi-subagent — notification card renderer.
+ * pi-subagents — notification card renderer.
  *
  * Background-agent completion notifications (registerMessageRenderer) —
- * the only surface still rendered directly: it's a custom message, not a
- * tool result, so it doesn't go through createToolView.
+ * rendered directly: a custom message, not a tool result, so it does not
+ * go through createToolView. Notification renderers own their styling;
+ * every status uses Pi's custom-message background, not a tool shell.
  */
 
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { type CardBody, renderNoDetailsCard, renderNotificationCard } from "./card.js";
 import type { NotificationDetails } from "./types.js";
-import { type CardIcon, type Component, errorIcon, stoppedIcon, successIcon } from "./ui/card.js";
+import {
+	type BodyComponent,
+	type CardBody,
+	type CardConfig,
+	type CardIcon,
+	type Component,
+	cardShell,
+	contentRow,
+	errorIcon,
+	renderCard as renderCardUi,
+	stoppedIcon,
+	successIcon,
+} from "./ui/card.js";
 import { formatDuration } from "./ui/spinner.js";
+
+/** Notification card: the internal card grammar inside a custom-message shell. */
+function renderNotificationCard(config: CardConfig, theme: Theme): BodyComponent {
+	return cardShell(theme, "customMessageBg", renderCardUi(config, theme));
+}
+
+/** Missing details: a dim one-liner inside the same custom-message shell. */
+function renderNoDetailsCard(theme: Theme): BodyComponent {
+	return cardShell(theme, "customMessageBg", contentRow(theme.fg("dim", "(no details)")));
+}
 
 function formatTokens(n: number): string {
 	return n.toLocaleString("en-US");
@@ -31,7 +53,7 @@ export function renderNotification(
 	const icon: CardIcon = d.status === "completed" ? successIcon : d.status === "failed" ? errorIcon : stoppedIcon;
 	// The card name is the agent, never the tool that created it: a notification
 	// is a message ("that agent finished"), and spelling it agent_spawn makes it
-	// read as a fresh spawn next to the real spawn card (#31). The status word is
+	// read as a fresh spawn next to the real spawn card. The status word is
 	// what says the turn ended — carried by the icon + word, not the shell, so
 	// every status shares the message background.
 	const status: { text: string; color: "error" | "muted" | "warning" } =
@@ -50,9 +72,8 @@ export function renderNotification(
 	// Persistent agent completed: resident (idle) — muted marker in the meta.
 	if (d.idle) metaParts.push("idle");
 
-	// Result text rides pi-ui's message channel (folded block, toolOutput color).
-	// The old events channel died with pi-subagent's own renderCard — pi-ui's
-	// renderCardUi only renders extra/error/message.
+	// Result text uses the internal UI layer's message body (folded block,
+	// toolOutput color), separate from activity-stream rows.
 	const body: CardBody = d.result?.trim() ? { message: d.result.trim() } : {};
 
 	return renderNotificationCard(

@@ -1,5 +1,5 @@
 /**
- * pi-ui — shared card-header rendering.
+ * Internal UI layer — shared card-header rendering.
  *
  * One header row: `[marker] <name> "title" <state word / status> (<meta>)`.
  * The marker is a status icon (accent spinner / ✓ / ✗ / ■); the quoted title
@@ -21,7 +21,8 @@ import {
 
 export type { Component } from "@earendil-works/pi-tui";
 
-import { Spinner, safeTitle } from "./spinner.js";
+import { Spinner } from "./spinner.js";
+import { safeTitle } from "./width.js";
 
 /** Icon slot: any glyph + any color (color is data; preset constants below). */
 export interface CardIcon {
