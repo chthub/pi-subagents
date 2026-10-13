@@ -16,6 +16,7 @@ import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { AgentProcess } from "./agent-process.js";
 import type { AgentActivity } from "./event-interpret.js";
 import { isTerminal, type Roster, type RosterActivity, type RosterEntry, type RosterStatus } from "./roster.js";
+import { displayAgentId } from "./tree-display.js";
 import { formatElapsed, SPINNER_TICK_MS, Spinner } from "./ui/spinner.js";
 import { type TickerHandle, ticker } from "./ui/ticker.js";
 import type { WidgetResult, WidgetRow, WidgetStatus } from "./ui/widget.js";
@@ -182,7 +183,7 @@ export class AgentWidget {
 
 	private render(theme: Theme, width: number): string[] {
 		const { shown, hidden } = pickVisible(this.roster.list(), MAX_LINES);
-		const idWidth = Math.max(...shown.map((e) => visibleWidth(atId(e.agentId))));
+		const idWidth = Math.max(...shown.map((e) => visibleWidth(atId(displayAgentId(e.agentId)))));
 		const lines: string[] = [];
 		this.lineAgents = [];
 		for (const entry of shown) {
@@ -254,7 +255,7 @@ function plainAgentLine(
 ): string {
 	const icon = STATUS_ICON[entry.status];
 	const glyph = entry.status === "running" ? spinner.current() : icon.glyph;
-	const id = atId(entry.agentId);
+	const id = atId(displayAgentId(entry.agentId));
 	const marker = hovered ? theme.fg("accent", "\u25b8") : " ";
 	const prefix = `${"  ".repeat(entry.indent)}${marker}${theme.fg(icon.color, glyph)} ${theme.fg("accent", id)}${" ".repeat(Math.max(0, idWidth - visibleWidth(id)))}  `;
 	const meta = statusMeta(entry);

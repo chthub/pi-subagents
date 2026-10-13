@@ -55,6 +55,7 @@ interface PendingWaiter {
 	resolve: (response: RpcResponse) => void;
 	reject: (err: Error) => void;
 	timer: NodeJS.Timeout;
+	onResponse?: (response: RpcResponse) => void;
 }
 
 export class RpcClient {
@@ -122,13 +123,17 @@ export class RpcClient {
 		return this.proc.exitCode;
 	}
 
+	get exitSignal(): NodeJS.Signals | null {
+		return this.proc.signalCode;
+	}
+
 	/** Resolves when the child process has exited. */
 	waitForExit(): Promise<{ code: number | null; signal: string | null }> {
 		return this.exitPromise;
 	}
 
 	/** Send one command and await its correlated response. */
-	sendCommand(command: RpcCommand): Promise<RpcResponse> {
+	sendCommand(command: RpcCommand, onResponse?: (response: RpcResponse) => void): Promise<RpcResponse> {
 		// Unique per-command id: the pending map is keyed by id and the child
 		// echoes it back — a shared id (e.g. the agent id) would let a later
 		// command steal an earlier waiter and mismatch responses.
@@ -139,7 +144,7 @@ export class RpcClient {
 				reject(new Error(`RPC timeout waiting for "${command.type}" response`));
 			}, RESPONSE_TIMEOUT_MS);
 
-			this.pending.set(cmd.id, { resolve, reject, timer });
+			this.pending.set(cmd.id, { resolve, reject, timer, onResponse });
 			const stdin = this.proc.stdin;
 			// Guard against shutdown races: a command written after endInput()
 			// would throw ERR_STREAM_WRITE_AFTER_END (unhandled 'error' crash).
@@ -169,7 +174,9 @@ export class RpcClient {
 
 	/** Hard fallback: signal the whole child process group (detached). */
 	kill(signal: NodeJS.Signals = "SIGTERM"): void {
-		if (this.closed || this.proc.exitCode !== null) return;
+		// A leader can already have exited while descendants still hold its
+		// pipes open. Until close, its process group must remain signalable.
+		if (this.closed) return;
 		const pid = this.proc.pid;
 		if (pid === undefined) return;
 		if (process.platform !== "win32") {
@@ -223,6 +230,9 @@ export class RpcClient {
 			if (!waiter) return;
 			clearTimeout(waiter.timer);
 			this.pending.delete(id);
+			// Apply acceptance before parsing subsequent events in the same stdout
+			// chunk: a fast run can settle before promise continuations execute.
+			waiter.onResponse?.(parsed.response);
 			waiter.resolve(parsed.response);
 			return;
 		}

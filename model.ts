@@ -31,9 +31,9 @@ interface ModelLite {
 }
 
 /**
- * Resolve `originalModel` against `registry`, falling back to `fallback` (parent model) on no match.
- *
- * `fallback` is the parent's `Model`-shaped object or undefined; we format it as `provider/id`.
+ * Resolve `originalModel` against `registry`; inherit `fallback` only when
+ * no model was requested. Exact provider/id matches precede loose matches.
+ * `fallback` is the parent's `Model`-shaped object or undefined.
  */
 export function resolveModel(
 	registry: ModelRegistry,
@@ -58,22 +58,24 @@ export function resolveModel(
 		// substring match against every model.
 		return { error: `Model "${originalModel}" not available.` };
 	}
-	const normModel = normalize(modelName);
+	const requestedId = modelName.trim().toLowerCase();
+	const normModel = normalize(requestedId);
+	const select = (candidates: ModelLite[]): ModelLite | undefined =>
+		candidates.find((m) => m.id.toLowerCase() === requestedId) ??
+		candidates.find((m) => normalize(m.id) === normModel) ??
+		candidates.find((m) => normalize(m.id).includes(normModel));
 
-	const matches = (m: ModelLite) =>
-		normalize(`${m.provider}/${m.id}`).includes(normModel) || normalize(m.id).includes(normModel);
-
+	let match: ModelLite | undefined;
 	if (providerHint) {
-		const normProvider = normalize(providerHint);
-		for (const m of available) {
-			if (normalize(m.provider).includes(normProvider) && matches(m)) {
-				return { model: `${m.provider}/${m.id}` };
-			}
-		}
+		const requestedProvider = providerHint.trim().toLowerCase();
+		const normProvider = normalize(requestedProvider);
+		match =
+			select(available.filter((m) => m.provider.toLowerCase() === requestedProvider)) ??
+			select(available.filter((m) => normalize(m.provider) === normProvider)) ??
+			select(available.filter((m) => normalize(m.provider).includes(normProvider)));
 	}
-	for (const m of available) {
-		if (matches(m)) return { model: `${m.provider}/${m.id}` };
-	}
+	match ??= select(available);
+	if (match) return { model: `${match.provider}/${match.id}` };
 
 	return {
 		error: `Model "${originalModel}" not available.`,

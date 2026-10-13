@@ -121,6 +121,87 @@ test("delayed background results do not undo a completed snapshot", () => {
 	assert.equal(restored.startedAt, 1000);
 });
 
+for (const status of ["stopped", "failed", "done"] as const) {
+	for (const lateStatus of ["completed", "failed", "stopped"] as const) {
+		test(`delayed ${lateStatus} result cannot undo a newer ${status} snapshot`, () => {
+			const manager = SessionManager.inMemory();
+			manager.appendCustomEntry(ROSTER_STATE_TYPE, {
+				entries: [{ ...row("max", status), endedAt: 3000 }],
+			});
+			manager.appendCustomMessageEntry("subagent-notification", "old turn result", true, {
+				agent_id: "max",
+				status: lateStatus,
+				sessionPath: "/s/old-turn.jsonl",
+				usage: { durationMs: 1000 },
+			});
+			const [restored] = rosterFromBranch(manager.getBranch());
+			assert.equal(restored.status, status);
+			assert.equal(restored.endedAt, 3000);
+			assert.equal(restored.sessionPath, "/s/max.jsonl");
+			assert.ok(JSON.stringify(buildSessionContext(manager.getBranch()).messages).includes("old turn result"));
+		});
+	}
+}
+
+test("a delayed result can recover a missing session path without retracting stop", () => {
+	const manager = SessionManager.inMemory();
+	manager.appendCustomEntry(ROSTER_STATE_TYPE, {
+		entries: [{ ...row("max", "stopped"), endedAt: 3000, sessionPath: undefined }],
+	});
+	manager.appendCustomMessageEntry("subagent-notification", "old answer", true, {
+		agent_id: "max",
+		status: "completed",
+		sessionPath: "/s/recovered.jsonl",
+		usage: { durationMs: 1000 },
+	});
+	const [restored] = rosterFromBranch(manager.getBranch());
+	assert.equal(restored.status, "stopped");
+	assert.equal(restored.endedAt, 3000);
+	assert.equal(restored.sessionPath, "/s/recovered.jsonl");
+});
+
+for (const status of ["running", "idle"] as const) {
+	test(`a newer ${status} snapshot permits the revived turn's completion`, () => {
+		const manager = SessionManager.inMemory();
+		manager.appendCustomEntry(ROSTER_STATE_TYPE, {
+			entries: [{ ...row("max", "stopped"), endedAt: 3000 }],
+		});
+		manager.appendCustomEntry(ROSTER_STATE_TYPE, { entries: [row("max", status)] });
+		manager.appendCustomMessageEntry("subagent-notification", "new answer", true, {
+			agent_id: "max",
+			status: "completed",
+			sessionPath: "/s/new-turn.jsonl",
+			usage: { durationMs: 5000 },
+		});
+		const [restored] = rosterFromBranch(manager.getBranch());
+		assert.equal(restored.status, "done");
+		assert.equal(restored.endedAt, 6000);
+		assert.equal(restored.sessionPath, "/s/new-turn.jsonl");
+	});
+}
+
+test("a stop after the snapshot wins over a delayed completion", () => {
+	const manager = SessionManager.inMemory();
+	manager.appendCustomEntry(ROSTER_STATE_TYPE, { entries: [row("max", "idle")] });
+	manager.appendMessage({
+		role: "toolResult",
+		toolName: "agent_stop",
+		toolCallId: "stop",
+		content: [],
+		details: { agentId: "max" },
+		isError: false,
+		timestamp: 3000,
+	} as never);
+	manager.appendCustomMessageEntry("subagent-notification", "old answer", true, {
+		agent_id: "max",
+		status: "completed",
+		usage: { durationMs: 1000 },
+	});
+	const [restored] = rosterFromBranch(manager.getBranch());
+	assert.equal(restored.status, "stopped");
+	assert.equal(restored.endedAt, 3000);
+});
+
 test("standalone completion notifications recover older nested-tool spawns", () => {
 	const manager = SessionManager.inMemory();
 	manager.appendCustomMessageEntry("subagent-notification", "done", true, {

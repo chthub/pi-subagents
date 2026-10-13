@@ -15,7 +15,6 @@ import type { KeybindingsManager, Theme, ToolRenderers } from "@earendil-works/p
 import { AssistantMessageComponent, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import {
 	type Component,
-	Container,
 	Editor,
 	type EditorTheme,
 	type Focusable,
@@ -29,10 +28,10 @@ import {
 	visibleWidth,
 } from "@earendil-works/pi-tui";
 import { AgentFooter, type AgentFooterData } from "./agent-footer.js";
-import { AssistantStream } from "./assistant-stream.js";
+import { AssistantStream, type AssistantStreamSnapshot } from "./assistant-stream.js";
 import type { RpcEvent } from "./protocol.js";
 import { isTerminal, type RosterEntry } from "./roster.js";
-import { buildTranscript } from "./transcript.js";
+import { buildTranscript, Transcript } from "./transcript.js";
 import { formatDuration, SPINNER_TICK_MS, Spinner } from "./ui/spinner.js";
 import { type TickerHandle, ticker } from "./ui/ticker.js";
 import { atId } from "./views.js";
@@ -46,6 +45,8 @@ export interface AgentViewDeps {
 	subscribe(listener: (event: RpcEvent) => void): (() => void) | undefined;
 	/** Identity of the live process (changes when the agent is revived). */
 	processKey(): unknown;
+	/** Current assistant fold for a late subscriber, including original wire indices. */
+	streamingSnapshot?(): AssistantStreamSnapshot | undefined;
 	/** The conversation so far: from the live child, else from the session file. */
 	loadMessages(): Promise<unknown[]>;
 	/** Deliver a user message (reviving a finished agent). Resolves an error text, or undefined. */
@@ -70,7 +71,8 @@ export class AgentView implements Component, Focusable {
 	private readonly editor: Editor;
 	private readonly footer = new AgentFooter();
 	private readonly spinner = new Spinner();
-	private transcript: Container = new Container();
+	private transcript = new Transcript();
+	private disposed = false;
 	private transcriptCache: { width: number; lines: string[] } | undefined;
 	/** The live assistant turn, built from streamed deltas until message_end. */
 	private streaming: { stream: AssistantStream; component: AssistantMessageComponent; ended: boolean } | undefined;
@@ -138,6 +140,10 @@ export class AgentView implements Component, Focusable {
 	}
 
 	dispose(): void {
+		if (this.disposed) return;
+		this.disposed = true;
+		this.reloadSeq++;
+		this.transcript.dispose();
 		this.dragGrabOffset = undefined;
 		this.scrollbarHovered = false;
 		this.scrollbar = undefined;
@@ -315,14 +321,28 @@ export class AgentView implements Component, Focusable {
 
 	/** (Re)subscribe to the live process — a revive brings a new one. */
 	private attach(): void {
+		if (this.disposed) return;
 		const key = this.deps.processKey();
 		if (key === this.attachedKey && this.unsubscribeEvents) return;
 		this.unsubscribeEvents?.();
 		this.attachedKey = key;
+		this.streaming = undefined;
 		this.unsubscribeEvents = this.deps.subscribe((event) => this.onEvent(event));
+		const snapshot = this.deps.streamingSnapshot?.();
+		if (snapshot) this.startStream(snapshot.message, snapshot.contentIndices);
+	}
+
+	private startStream(message: AssistantMessage, contentIndices?: readonly number[]): void {
+		const stream = new AssistantStream(message, contentIndices);
+		this.streaming = {
+			stream,
+			component: new AssistantMessageComponent(stream.message, false, getMarkdownTheme()),
+			ended: false,
+		};
 	}
 
 	private onRosterChange(): void {
+		if (this.disposed) return;
 		const key = this.deps.processKey();
 		if (key !== this.attachedKey) {
 			this.attach();
@@ -333,6 +353,7 @@ export class AgentView implements Component, Focusable {
 	}
 
 	private async reload(): Promise<void> {
+		if (this.disposed) return;
 		const seq = ++this.reloadSeq;
 		// Both load at once; a footer that cannot load must not cost the conversation.
 		const footer = this.deps.footer?.().catch(() => undefined);
@@ -340,28 +361,34 @@ export class AgentView implements Component, Focusable {
 		try {
 			messages = await this.deps.loadMessages();
 		} catch (err) {
-			this.notice = `Could not load the conversation: ${err instanceof Error ? err.message : String(err)}`;
+			if (!this.disposed && seq === this.reloadSeq) {
+				this.notice = `Could not load the conversation: ${err instanceof Error ? err.message : String(err)}`;
+			}
 		}
 		const footerData = footer && (await footer);
 		if (seq !== this.reloadSeq) return; // a newer reload superseded this one
 		this.footer.update(footerData);
-		this.transcript = buildTranscript(messages, {
+		const transcript = buildTranscript(messages, {
 			tui: this.tui,
 			cwd: this.deps.entry()?.cwd ?? this.deps.cwd,
 			renderers: (name) => this.deps.renderers(name),
 			expanded: this.expanded,
 		});
+		this.transcript.dispose();
+		this.transcript = transcript;
 		this.transcriptCache = undefined;
 		this.tui.requestRender();
 	}
 
 	/** Coalesce bursts (message_end + tool results) into one reload. */
 	private scheduleReload(): void {
+		if (this.disposed) return;
 		if (this.reloadTimer) clearTimeout(this.reloadTimer);
 		this.reloadTimer = setTimeout(() => {
 			this.reloadTimer = undefined;
 			const live = this.streaming?.ended ? this.streaming : undefined;
 			void this.reload().then(() => {
+				if (this.disposed) return;
 				// A slow replay must not erase a new turn or an unfinished stream.
 				if (live && this.streaming === live) this.streaming = undefined;
 				this.tui.requestRender();
@@ -370,16 +397,12 @@ export class AgentView implements Component, Focusable {
 	}
 
 	private onEvent(event: RpcEvent): void {
+		if (this.disposed) return;
 		switch (event.type) {
 			case "message_start": {
 				const message = event.message as AssistantMessage | undefined;
 				if (message?.role !== "assistant") return;
-				const stream = new AssistantStream(message);
-				this.streaming = {
-					stream,
-					component: new AssistantMessageComponent(stream.message, false, getMarkdownTheme()),
-					ended: false,
-				};
+				this.startStream(message);
 				this.tui.requestRender();
 				return;
 			}
@@ -426,6 +449,7 @@ export class AgentView implements Component, Focusable {
 		this.notice = entry && isTerminal(entry.status) ? "Reviving…" : "Sending…";
 		this.tui.requestRender();
 		const error = await this.deps.send(text);
+		if (this.disposed) return;
 		this.sending = false;
 		const after = this.deps.entry();
 		this.notice = error
@@ -456,6 +480,7 @@ export class AgentView implements Component, Focusable {
 		this.notice = "Stopping\u2026";
 		this.tui.requestRender();
 		const error = await this.deps.stop();
+		if (this.disposed) return;
 		this.notice = error ?? "Stopped \u2014 send a message to resume";
 		this.tui.requestRender();
 	}

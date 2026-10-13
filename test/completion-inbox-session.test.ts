@@ -26,10 +26,17 @@ function result(id: string): CompletionNotice {
 	);
 }
 
-async function setup(t: TestContext, extra?: (pi: ExtensionAPI, deliver: (id: string) => void) => void) {
+async function setup(
+	t: TestContext,
+	extra?: (pi: ExtensionAPI, deliver: (id: string) => void) => void,
+	keepRecentTokens = 20_000,
+) {
 	const dir = mkdtempSync(join(tmpdir(), "pi-completion-test-"));
 	t.after(() => rmSync(dir, { recursive: true, force: true }));
-	const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } });
+	const settingsManager = SettingsManager.inMemory({
+		compaction: { enabled: false, keepRecentTokens },
+		retry: { enabled: false },
+	});
 	let capture!: () => (notice: CompletionNotice) => void;
 	let deliver!: (notice: CompletionNotice) => void;
 	const resourceLoader = new DefaultResourceLoader({
@@ -274,6 +281,52 @@ test("real user abort during a tool does not turn late completions into a restar
 	assert.ok(JSON.stringify(h.session.messages).includes("b:1"));
 	assert.deepEqual(h.errors, []);
 });
+
+for (const outcome of ["completed", "cancelled", "failed"] as const) {
+	test(`real ${outcome} manual compaction flushes a ready batch without a second child callback`, async (t) => {
+		const h = await setup(
+			t,
+			(pi, deliver) => {
+				pi.on("session_before_compact", async (event) => {
+					deliver("during-compact:1");
+					deliver("during-compact:2");
+					await tick(); // The idle callback runs while Pi is still compacting.
+					if (outcome === "cancelled") return { cancel: true };
+					if (outcome === "failed") return;
+					return {
+						compaction: {
+							summary: "offline summary",
+							firstKeptEntryId: event.preparation.firstKeptEntryId,
+							tokensBefore: event.preparation.tokensBefore,
+						},
+					};
+				});
+			},
+			10,
+		);
+		await h.session.prompt("first ".repeat(1000));
+		await h.session.prompt("second ".repeat(1000));
+		if (outcome === "failed") {
+			let failSummary = true;
+			h.reply(() => {
+				if (failSummary) {
+					failSummary = false;
+					return { content: [], stopReason: "error" };
+				}
+				return { content: [{ type: "text", text: "integrated" }], stopReason: "stop" };
+			});
+		}
+		if (outcome === "completed") await h.session.compact();
+		else await assert.rejects(h.session.compact());
+		await tick();
+		await h.session.waitForIdle();
+		assert.equal(h.requests.length, outcome === "failed" ? 4 : 3, "one wake for the complete batch");
+		const request = h.requests.at(-1) ?? "";
+		for (const id of ["during-compact:1", "during-compact:2"]) assert.ok(request.includes(id));
+		assert.equal(h.session.sessionManager.getBranch().filter((e) => e.type === "custom_message").length, 2);
+		assert.deepEqual(h.errors, []);
+	});
+}
 
 test("real aborted response saves a pending result without restarting the model", async (t) => {
 	const h = await setup(t);

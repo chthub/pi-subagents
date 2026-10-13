@@ -11,6 +11,8 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { AgentProcess, type AgentProcessOptions } from "../agent-process.js";
 import type { AgentActivity } from "../event-interpret.js";
+import type { RpcResponse } from "../protocol.js";
+import { AgentRegistry } from "../registry.js";
 import type { RpcClientOptions } from "../rpc-client.js";
 
 /** Programmable fake standing in for RpcClient. */
@@ -19,7 +21,10 @@ class FakeClient {
 	endInputCalls = 0;
 	killCalls = 0;
 	exitCode: number | null = null;
+	exitSignal: NodeJS.Signals | null = null;
 	isClosed = false;
+	closeOnEnd = true;
+	promptDisposition: "started" | "queued" | "handled" = "started";
 	/** argv captured at construction (--model/--tools/--session-dir). */
 	args: string[] = [];
 	/** env captured at construction (identity injection). */
@@ -51,12 +56,21 @@ class FakeClient {
 		this.env = options.env;
 	}
 
-	async sendCommand(command: { type: string; message?: string }) {
+	async sendCommand(
+		command: { type: string; message?: string },
+		onResponse?: (response: RpcResponse) => void,
+	): Promise<RpcResponse> {
+		const response = await this.response(command);
+		onResponse?.(response);
+		return response;
+	}
+
+	private async response(command: { type: string; message?: string }): Promise<RpcResponse> {
 		this.commands.push(command);
 		switch (command.type) {
 			case "prompt":
 				return this.promptOk
-					? { type: "response", command: "prompt", success: true }
+					? { type: "response", command: "prompt", success: true, data: { disposition: this.promptDisposition } }
 					: { type: "response", command: "prompt", success: false, error: "preflight failed" };
 			case "get_state":
 				return {
@@ -112,16 +126,17 @@ class FakeClient {
 		this.onEvent?.(event as never);
 	}
 
-	emitExit(code: number): void {
+	emitExit(code: number | null, signal: NodeJS.Signals | null = null): void {
 		this.exitCode = code;
+		this.exitSignal = signal;
 		this.isClosed = true;
 		this.onExit?.();
-		this.exitResolve({ code, signal: null });
+		this.exitResolve({ code, signal });
 	}
 
 	endInput(): void {
 		this.endInputCalls++;
-		this.emitExit(0);
+		if (this.closeOnEnd) this.emitExit(0);
 	}
 
 	kill(): void {
@@ -196,6 +211,10 @@ describe("AgentProcess — spawnAndSend", () => {
 		assert.deepEqual(listed.slice(0, 2), ["--tools", "agent_send,read"]);
 		const revived = makeAgent({ cwd: "/tmp", label: "x", tools: ["read"], resumeSession: "/s.jsonl" }).fake.args;
 		assert.deepEqual(revived.slice(0, 2), ["--tools", "read,agent_send"]);
+		assert.deepEqual(makeAgent({ cwd: "/tmp", label: "x", tools: [] }).fake.args.slice(0, 2), [
+			"--tools",
+			"agent_send",
+		]);
 		assert.ok(!makeAgent({ cwd: "/tmp", label: "x" }).fake.args.includes("--tools"));
 	});
 
@@ -769,6 +788,7 @@ describe("AgentProcess — wake turns", () => {
 		assert.deepEqual(outcomes, ["stopped"]);
 		assert.equal(fake.endInputCalls, 1);
 		assert.equal(agent.stoppedByControl, false, "a limit is not a deliberate stop");
+		assert.equal((await agent.completionSnapshot()).stoppedByControl, false);
 	});
 
 	it("a wake that settles in time is not affected by timeoutMs", async () => {
@@ -804,6 +824,300 @@ describe("AgentProcess — wake turns", () => {
 		await agent.stop();
 		assert.equal(agent.stoppedByControl, false);
 		assert.equal(fake.endInputCalls, 1);
+		assert.deepEqual(outcomes, []);
+	});
+});
+
+describe("AgentProcess — immutable completion snapshots", () => {
+	it("binds its first wait to the spawn turn even when a wake starts during initial session lookup", {
+		timeout: 1_000,
+	}, async () => {
+		const { agent, fake } = makeAgent({ cwd: "/tmp", persistent: true });
+		let releaseState!: (value: RpcResponse) => void;
+		let enteredState!: () => void;
+		const stateEntered = new Promise<void>((resolve) => {
+			enteredState = resolve;
+		});
+		const send = fake.sendCommand.bind(fake);
+		fake.sendCommand = async (command, onResponse) => {
+			if (command.type === "get_state") {
+				enteredState();
+				return new Promise((resolve) => {
+					releaseState = resolve;
+				});
+			}
+			return send(command, onResponse);
+		};
+		const spawning = agent.spawnAndSend("first");
+		await stateEntered;
+		fake.lastText = "initial answer";
+		fake.emitSettled();
+		const firstId = agent.completionId;
+		await agent.sendMessage("view wake", "user");
+		assert.notEqual(agent.completionId, firstId);
+		assert.equal(agent.status, "running");
+		fake.lastText = "follow-up answer";
+		releaseState({
+			type: "response",
+			command: "get_state",
+			success: true,
+			data: { sessionFile: "/tmp/initial.jsonl", sessionId: "initial" },
+		});
+		assert.deepEqual(await spawning, { ok: true });
+		const first = await agent.waitForCompletion();
+		assert.equal(first.completionId, firstId);
+		assert.equal(first.output, "initial answer");
+		assert.equal(first.status, "completed");
+		assert.equal(first.owedToParent, true);
+		assert.equal(first.sessionId, "initial");
+		assert.equal(agent.status, "running", "the first wait must not settle or await the follow-up");
+		fake.emitSettled();
+		const followUp = await agent.completionSnapshot();
+		assert.notEqual(followUp.completionId, firstId);
+		assert.equal(followUp.output, "follow-up answer");
+		assert.equal(followUp.owedToParent, false);
+		assert.strictEqual(await agent.waitForCompletion(), first, "the initial completion handle remains stable");
+	});
+
+	it("freezes the first settlement while metadata reads and a new wake overlap", async () => {
+		const { agent, fake } = makeAgent({ cwd: "/tmp", persistent: true });
+		await agent.spawnAndSend("first");
+		const rows: string[] = [];
+		const registry = new AgentRegistry({
+			notify: () => {},
+			getWidget: () => ({ add() {}, remove() {}, dispose() {}, setStatus: (_id, status) => rows.push(status) }),
+		});
+		registry.register(agent);
+		let release!: (value: RpcResponse) => void;
+		const send = fake.sendCommand.bind(fake);
+		fake.sendCommand = async (command, onResponse) => {
+			if (command.type === "get_session_stats")
+				return new Promise((resolve) => {
+					release = resolve;
+				});
+			return send(command, onResponse);
+		};
+		fake.lastText = "first answer";
+		const waiting = agent.waitForCompletion();
+		fake.emitSettled();
+		const snapshot = agent.completionSnapshot();
+		const firstId = agent.completionId;
+		assert.equal(agent.status, "completed");
+		await agent.sendMessage("second", "user");
+		fake.lastText = "second answer";
+		assert.notEqual(agent.completionId, firstId, "acceptance advances identity before the next settle");
+		release({ type: "response", command: "get_session_stats", success: true, data: { tokens: { total: 42 } } });
+		const completion = await waiting;
+		assert.strictEqual(await snapshot, completion);
+		assert.equal(completion.completionId, firstId);
+		assert.equal(completion.status, "completed");
+		assert.equal(completion.output, "first answer");
+		assert.equal(completion.owedToParent, true);
+		assert.equal(agent.parentIsWaiting, false);
+		assert.equal(agent.status, "running", "old metadata reads cannot mutate the accepted wake");
+		assert.equal(agent.isCurrentCompletion(completion), false);
+		await registry.complete(agent, completion);
+		assert.equal(registry.lookup(agent.agentId), agent);
+		assert.equal(fake.endInputCalls, 0);
+		assert.deepEqual(rows, [], "the old completion cannot put the new turn's row back to idle");
+	});
+
+	it("does not let a stopped later wake suppress the pending first completion", async () => {
+		const { agent, fake } = makeAgent({ cwd: "/tmp", persistent: true });
+		const notified: string[] = [];
+		const registry = new AgentRegistry({
+			notify: (_agent, completion) => {
+				notified.push(completion.output);
+			},
+		});
+		await agent.spawnAndSend("first");
+		registry.register(agent);
+		let releaseStats!: (value: RpcResponse) => void;
+		let statsReads = 0;
+		const send = fake.sendCommand.bind(fake);
+		fake.sendCommand = async (command, onResponse) => {
+			if (command.type === "get_session_stats" && statsReads++ === 0) {
+				return new Promise((resolve) => {
+					releaseStats = resolve;
+				});
+			}
+			return send(command, onResponse);
+		};
+		fake.lastText = "first answer";
+		fake.emitSettled();
+		const firstPending = agent.waitForCompletion();
+		await registry.deliver(agent.agentId, "second");
+		await registry.stopAndRemove(agent.agentId);
+		assert.equal(agent.stoppedByControl, true);
+		const stoppedWake = await agent.completionSnapshot();
+		assert.equal(stoppedWake.status, "stopped");
+		assert.equal(stoppedWake.stoppedByControl, true);
+		await registry.complete(agent, stoppedWake);
+		assert.deepEqual(notified, [], "the stopped wake stays silent");
+		releaseStats({ type: "response", command: "get_session_stats", success: true, data: {} });
+		const first = await firstPending;
+		assert.equal(first.stoppedByControl, false, "the completed first turn's control policy is immutable");
+		await registry.complete(agent, first);
+		assert.deepEqual(notified, ["first answer"]);
+		assert.equal(registry.lookup(agent.agentId), undefined);
+	});
+
+	it("uses authoritative message_end output even if the inspection RPC sees newer text", async () => {
+		const { agent, fake } = makeAgent({ cwd: "/tmp", persistent: true });
+		await agent.spawnAndSend("first");
+		fake.emitEvent({
+			type: "message_end",
+			message: { role: "assistant", content: [{ type: "text", text: "first final" }] },
+		} as never);
+		fake.lastText = "not this turn";
+		fake.emitSettled();
+		assert.equal((await agent.waitForCompletion()).output, "first final");
+	});
+
+	it("freezes a wake snapshot before invoking onIdle", async () => {
+		let captured!: Promise<import("../agent-process.js").AgentCompletion>;
+		const { agent, fake } = makeAgent({
+			cwd: "/tmp",
+			persistent: true,
+			onIdle: () => {
+				captured = agent.completionSnapshot();
+			},
+		});
+		await agent.spawnAndSend("first");
+		fake.emitSettled();
+		await agent.waitForCompletion();
+		await agent.sendMessage("second");
+		fake.lastText = "second final";
+		fake.emitSettled();
+		await agent.sendMessage("third", "user");
+		const completion = await captured;
+		assert.equal(completion.output, "second final");
+		assert.equal(completion.status, "completed");
+		assert.equal(completion.owedToParent, true);
+		assert.equal(agent.status, "running");
+		assert.equal(agent.isCurrentCompletion(completion), false);
+	});
+});
+
+describe("AgentProcess — prompt dispositions and crashes", () => {
+	it("rejects an initial handled prompt rather than waiting for a nonexistent run", async () => {
+		const { agent, fake } = makeAgent({ cwd: "/tmp" });
+		fake.promptDisposition = "handled";
+		const result = await agent.spawnAndSend("/command");
+		assert.equal(result.ok, false);
+		if (!result.ok) assert.match(result.error, /handled without starting/);
+		assert.equal(agent.status, "failed");
+		assert.equal(agent.parentIsWaiting, false);
+	});
+
+	it("does not wake an idle resident or claim ownership when a prompt was handled", async () => {
+		const { agent, fake, outcomes } = await idleAgent();
+		const id = agent.completionId;
+		fake.promptDisposition = "handled";
+		assert.equal(await agent.sendMessage("/command"), false);
+		assert.equal(agent.status, "completed");
+		assert.equal(agent.completionId, id);
+		assert.deepEqual(outcomes, []);
+	});
+
+	it("a handled command during a user run neither settles nor claims its answer", async () => {
+		const { agent, fake, outcomes } = await idleAgent();
+		await agent.sendMessage("side chat", "user");
+		const id = agent.completionId;
+		fake.promptDisposition = "handled";
+		assert.equal(await agent.sendMessage("/command", "parent"), false);
+		assert.equal(agent.status, "running");
+		assert.equal(agent.parentIsWaiting, false);
+		assert.equal(agent.completionId, id);
+		assert.deepEqual(outcomes, []);
+	});
+
+	for (const [code, signal] of [
+		[null, "SIGKILL"],
+		[0, null],
+	] as const) {
+		it(`reports premature exit (${code}, ${signal}) as failed`, async () => {
+			const { agent, fake } = makeAgent({ cwd: "/tmp", persistent: true });
+			await agent.spawnAndSend("first");
+			const waiting = agent.waitForCompletion();
+			fake.lastText = "";
+			fake.emitExit(code, signal);
+			const completion = await waiting;
+			assert.equal(completion.status, "failed");
+			if (signal) assert.match(completion.output, /SIGKILL/);
+		});
+	}
+});
+
+describe("AgentProcess — live assistant snapshots", () => {
+	it("keeps wire indices and returns detached snapshots until message_end", () => {
+		const { agent, fake } = makeAgent({ cwd: "/tmp" });
+		assert.equal(agent.getStreamingSnapshot(), undefined);
+		fake.emitEvent({
+			type: "message_start",
+			message: { role: "assistant", content: [], stopReason: "pending" },
+		} as never);
+		fake.emitEvent({
+			type: "message_update",
+			assistantMessageEvent: { type: "text_delta", contentIndex: 3, delta: "first" },
+		} as never);
+		const snapshot = agent.getStreamingSnapshot();
+		assert.ok(snapshot);
+		assert.deepEqual(snapshot.contentIndices, [3]);
+		assert.deepEqual(snapshot.message.content, [{ type: "text", text: "first" }]);
+		snapshot.message.content.length = 0;
+		snapshot.contentIndices[0] = 99;
+		fake.emitEvent({
+			type: "message_update",
+			assistantMessageEvent: { type: "text_delta", contentIndex: 3, delta: " second" },
+		} as never);
+		assert.deepEqual(agent.getStreamingSnapshot()?.message.content, [{ type: "text", text: "first second" }]);
+		assert.deepEqual(agent.getStreamingSnapshot()?.contentIndices, [3]);
+		fake.emitEvent({
+			type: "message_end",
+			message: { role: "assistant", content: [{ type: "text", text: "first second" }] },
+		} as never);
+		assert.equal(agent.getStreamingSnapshot(), undefined);
+	});
+});
+
+describe("AgentProcess — resident stop escalation", () => {
+	it("uses the same bounded shutdown for an idle resident and clears its timer", async (t) => {
+		const { agent, fake } = await idleAgent();
+		fake.closeOnEnd = false;
+		const signals: NodeJS.Signals[] = [];
+		fake.kill = ((signal: NodeJS.Signals) => {
+			signals.push(signal);
+			fake.emitExit(null, signal);
+		}) as typeof fake.kill;
+		t.mock.timers.enable({ apis: ["setTimeout"] });
+		const stopping = agent.stop();
+		assert.equal(fake.endInputCalls, 1);
+		assert.equal(agent.status, "stopped");
+		t.mock.timers.tick(5_000);
+		await stopping;
+		assert.deepEqual(signals, ["SIGTERM"]);
+		assert.equal(agent.stoppedByControl, false);
+	});
+
+	it("escalates an unresponsive resident to SIGKILL and stays silent during explicit stop", async (t) => {
+		const { agent, fake, outcomes } = await idleAgent();
+		await agent.sendMessage("second");
+		fake.closeOnEnd = false;
+		const signals: NodeJS.Signals[] = [];
+		fake.kill = ((signal: NodeJS.Signals) => {
+			signals.push(signal);
+			if (signal === "SIGKILL") fake.emitExit(null, signal);
+		}) as typeof fake.kill;
+		t.mock.timers.enable({ apis: ["setTimeout"] });
+		const stopping = agent.stop();
+		t.mock.timers.tick(5_000);
+		await new Promise<void>((resolve) => queueMicrotask(resolve));
+		await new Promise<void>((resolve) => queueMicrotask(resolve));
+		t.mock.timers.tick(5_000);
+		await stopping;
+		assert.deepEqual(signals, ["SIGTERM", "SIGKILL"]);
+		assert.equal(agent.stoppedByControl, true);
 		assert.deepEqual(outcomes, []);
 	});
 });

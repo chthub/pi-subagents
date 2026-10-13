@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { AgentTreeEvent } from "../event-interpret.js";
+import { Roster } from "../roster.js";
 import { createSubtreeDisplay } from "../tree-display.js";
 
 /** Recording fake: captures every widget mutation through the real surface. */
@@ -26,12 +27,13 @@ function fakeWidget() {
 	};
 }
 
-function harness(opts: { hasParent?: boolean; foregroundEdge?: boolean } = {}) {
+function harness(opts: { childId?: string; hasParent?: boolean; foregroundEdge?: boolean } = {}) {
 	const w = fakeWidget();
 	let exists = false;
 	const forward: AgentTreeEvent[] = [];
 	let folds = 0;
 	const display = createSubtreeDisplay({
+		childId: opts.childId ?? "a",
 		hasParent: opts.hasParent ?? false,
 		foregroundEdge: opts.foregroundEdge ?? true,
 		getWidget: () => (exists ? (w as never) : undefined),
@@ -71,14 +73,16 @@ describe("createSubtreeDisplay — single-display rule full chain", () => {
 		const h = harness({ hasParent: true });
 		h.display.onTreeEvent(addAt(1));
 		assert.equal(h.foldCount(), 0);
-		assert.deepEqual(h.forward, [{ op: "add", id: "k1", label: "K", startedAt: 1, depth: 2, status: "running" }]);
+		assert.deepEqual(h.forward, [
+			{ op: "add", id: "a/k1", label: "K", startedAt: 1, depth: 2, status: "running", parent: "a" },
+		]);
 	});
 
 	it("root + background child → widget rows at forwarded depth", () => {
 		const h = harness({ foregroundEdge: false });
 		h.openWidget();
 		h.display.onTreeEvent(addAt(2));
-		assert.deepEqual(h.w.calls, ["add:k1@2"]);
+		assert.deepEqual(h.w.calls, ["add:a/k1@2"]);
 		assert.deepEqual(h.display.nested().total, 0);
 	});
 
@@ -88,7 +92,7 @@ describe("createSubtreeDisplay — single-display rule full chain", () => {
 		h.display.onTreeEvent(addAt(0)); // folded while open
 		h.display.closeCard();
 		h.display.onTreeEvent({ op: "remove", id: "k1", status: "done" }); // post-return ending
-		assert.ok(h.w.calls.includes("remove:k1:done"), `widget got: ${h.w.calls}`);
+		assert.ok(h.w.calls.includes("remove:a/k1:done"), `widget got: ${h.w.calls}`);
 	});
 
 	it("add carries the direct parent id through to the widget row", () => {
@@ -98,11 +102,70 @@ describe("createSubtreeDisplay — single-display rule full chain", () => {
 		assert.equal(h.w.nested[0]?.parentId, "a");
 	});
 
-	it("forwarding keeps the parent link — only depth grows", () => {
+	it("forwarding scopes ids and parent links at each edge", () => {
 		const h = harness({ hasParent: true });
 		h.display.onTreeEvent({ ...addAt(1), parent: "a" });
 		assert.deepEqual(h.forward, [
-			{ op: "add", id: "k1", label: "K", startedAt: 1, depth: 2, status: "running", parent: "a" },
+			{ op: "add", id: "a/k1", label: "K", startedAt: 1, depth: 2, status: "running", parent: "a" },
 		]);
+	});
+
+	it("same-named descendants cannot overwrite a direct child or another subtree", () => {
+		const roster = new Roster();
+		roster.upsert({ agentId: "max", label: "direct", indent: 0, sessionPath: "/s/direct.jsonl" });
+		roster.upsert({ agentId: "zoe", label: "other", indent: 0 });
+		const widget = {
+			addNested: (entry: Parameters<Roster["upsert"]>[0]) => roster.upsert(entry),
+			remove: (id: string, status: "done" | "failed" | "stopped") => roster.setStatus(id, status),
+			updateActivity() {},
+		};
+		const display = (childId: string) =>
+			createSubtreeDisplay({
+				childId,
+				hasParent: false,
+				foregroundEdge: false,
+				getWidget: () => widget as never,
+				forward() {},
+				onFold() {},
+			});
+		const max = display("max");
+		const zoe = display("zoe");
+		const event = { ...addAt(1), id: "max", label: "nested" };
+		max.onTreeEvent(event);
+		zoe.onTreeEvent(event);
+		assert.equal(roster.list().length, 4);
+		assert.equal(roster.get("max")?.label, "direct");
+		assert.equal(roster.get("max")?.indent, 0);
+		assert.equal(roster.get("max/max")?.parentId, "max");
+		assert.equal(roster.get("zoe/max")?.parentId, "zoe");
+		max.onTreeEvent({ op: "remove", id: "max", status: "done" });
+		assert.equal(roster.get("max")?.status, "running");
+		assert.equal(roster.get("max/max")?.status, "done");
+		assert.equal(roster.get("zoe/max")?.status, "running");
+		roster.setStatus("zoe", "stopped");
+		assert.equal(roster.get("zoe/max")?.status, "stopped");
+	});
+
+	it("multi-hop ids and parent links remain scoped for add, activity and remove", () => {
+		const source = harness({ childId: "sam", hasParent: true });
+		const root = harness({ childId: "max", foregroundEdge: false });
+		root.openWidget();
+		source.display.onTreeEvent({ ...addAt(1), id: "max", parent: "sam" });
+		source.display.onTreeEvent({ op: "activity", id: "max", activity: { kind: "text", text: "hi" } });
+		source.display.onTreeEvent({ op: "remove", id: "max", status: "done" });
+		for (const event of source.forward) root.display.onTreeEvent(event);
+		assert.deepEqual(root.w.calls, ["add:max/sam/max@2", "activity:max/sam/max", "remove:max/sam/max:done"]);
+		assert.equal(root.w.nested[0]?.parentId, "max/sam");
+	});
+
+	it("same-named grandchildren under different parents count separately on a foreground card", () => {
+		const root = harness({ childId: "max" });
+		for (const childId of ["sam", "zoe"]) {
+			const child = harness({ childId, hasParent: true });
+			child.display.onTreeEvent({ ...addAt(1), id: "ada" });
+			for (const event of child.forward) root.display.onTreeEvent(event);
+		}
+		assert.equal(root.display.nested().total, 2);
+		assert.equal(root.display.nested().running, 2);
 	});
 });

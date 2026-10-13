@@ -11,7 +11,9 @@
  */
 
 import { createHash } from "node:crypto";
-import { writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { truncateHead, truncateTail } from "@earendil-works/pi-coding-agent";
 
 interface ContextStash {
@@ -26,22 +28,35 @@ export function truncationMarker(stashPath: string): string {
 	return `\n\n(output truncated — full output: ${stashPath})`;
 }
 
+let stashDirectory: string | undefined;
+const stashes = new Map<string, string>();
+
 /**
  * Cap `fullText` to the context budget; on truncation write the full text
- * to /tmp and return its path. Same key → same filename, so re-stashes are
- * idempotent overwrites. Write failures are best-effort: the caller still
- * gets the capped preview.
+ * into a private temporary directory. Different full texts never overwrite
+ * one another; identical reports can reuse their path within this runtime.
+ * Files survive runtime shutdown so saved result markers remain readable.
+ * Write failures are best-effort: the caller still gets the capped preview.
  *
- * @param key stable identifier hashed into the filename (agent id, url…)
+ * @param key stable identifier combined with the full content (agent id, url…)
  * @param opts.keep "head" keeps the beginning (documents), "tail" keeps the
  *   latest (activity output, pi-bash style). Default "head".
  */
 export function stashOverflow(fullText: string, key: string, opts?: { keep?: "head" | "tail" }): ContextStash {
 	const result = opts?.keep === "tail" ? truncateTail(fullText) : truncateHead(fullText);
 	if (!result.truncated) return { text: result.content };
-	const file = `/tmp/pi-stash-${createHash("sha1").update(key).digest("hex").slice(0, 8)}.txt`;
+	const digest = createHash("sha256")
+		.update(`${Buffer.byteLength(key)}:`)
+		.update(key)
+		.update(fullText)
+		.digest("hex");
 	try {
-		writeFileSync(file, fullText, "utf8");
+		const cached = stashes.get(digest);
+		if (cached && existsSync(cached)) return { text: result.content, stashPath: cached };
+		if (!stashDirectory || !existsSync(stashDirectory)) stashDirectory = mkdtempSync(join(tmpdir(), "pi-stash-"));
+		const file = join(stashDirectory, `${digest}.txt`);
+		writeFileSync(file, fullText, { encoding: "utf8", flag: "wx", mode: 0o600 });
+		stashes.set(digest, file);
 		return { text: result.content, stashPath: file };
 	} catch {
 		return { text: result.content }; // best-effort: never break the caller

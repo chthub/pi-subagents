@@ -101,10 +101,14 @@ export function registerCompletionInbox(pi: ExtensionAPI): {
 		if (event.aborted) suspended = true;
 		scheduleIdle();
 	});
-	pi.on("session_compact", (_event, ctx) => {
+	const afterCompaction = (_event: unknown, ctx: ExtensionContext): void => {
 		context = ctx;
 		scheduleIdle();
-	});
+	};
+	pi.on("session_compact", afterCompaction);
+	// A ready callback may have observed the session busy with compaction.
+	// Cancellation/failure also releases that busy state, without agent_settled.
+	pi.on("session_compact_failed", afterCompaction);
 	pi.on("session_shutdown", () => {
 		cancelScheduled();
 		closed = true;

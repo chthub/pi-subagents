@@ -127,6 +127,16 @@ interface AnimationHandle {
 	unsubscribe(): void;
 }
 
+// Only this module's subscriptions may be released by transcript cleanup;
+// another extension may use the same render-state field name.
+const animations = new WeakMap<object, AnimationHandle>();
+
+/** Release a detached tool card's UI clock without changing its execution state. */
+export function disposeToolViewAnimation(state: unknown): void {
+	if (!state || typeof state !== "object" || !animations.has(state)) return;
+	stopAnimation(state as Record<string, unknown>);
+}
+
 /** Start clock-driven redraws for a processing card: the ticker drives
  * invalidate at the spinner cadence, so the header spinner and the live
  * Elapsed meta animate on their own clock, decoupled from body content
@@ -140,6 +150,7 @@ function startAnimation(rc: RenderContext, st: Record<string, unknown>): void {
 		// mid-execution destroy must never leak a ticking timer.
 		if (!handle.alive || st.animation !== handle) {
 			if (st.animation === handle) st.animation = undefined;
+			if (animations.get(st) === handle) animations.delete(st);
 			handle.alive = false;
 			handle.unsubscribe();
 			return;
@@ -147,14 +158,16 @@ function startAnimation(rc: RenderContext, st: Record<string, unknown>): void {
 		rc.invalidate();
 	}, SPINNER_TICK_MS).unsubscribe;
 	st.animation = handle;
+	animations.set(st, handle);
 }
 
 /** Stop the clock-driver (terminal render — idempotent). */
 function stopAnimation(st: Record<string, unknown> | undefined): void {
 	if (!st) return;
-	const handle = st.animation as AnimationHandle | undefined;
+	const handle = animations.get(st);
 	if (!handle) return;
-	st.animation = undefined;
+	animations.delete(st);
+	if (st.animation === handle) st.animation = undefined;
 	handle.alive = false;
 	handle.unsubscribe();
 }

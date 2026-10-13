@@ -18,11 +18,12 @@
  */
 
 import { randomUUID } from "node:crypto";
-import type { Api, Model } from "@earendil-works/pi-ai";
+import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai";
 import type { ContextUsage } from "@earendil-works/pi-coding-agent";
+import { AssistantStream, type AssistantStreamSnapshot } from "./assistant-stream.js";
 import type { AgentTreeEvent } from "./event-interpret.js";
 import { type AgentActivity, interpretEvent } from "./event-interpret.js";
-import type { AgentMessage, RpcCommand, RpcEvent } from "./protocol.js";
+import type { AgentMessage, RpcCommand, RpcEvent, RpcResponse } from "./protocol.js";
 import { RpcClient, type RpcClientOptions } from "./rpc-client.js";
 import type { RenderEvent } from "./types.js";
 
@@ -56,6 +57,8 @@ export interface AgentCompletion {
 	sessionId?: string;
 	/** The parent was waiting for this turn's answer (see AgentProcess.parentIsWaiting). */
 	owedToParent?: boolean;
+	/** Control-stop policy frozen for this turn, not a later wake of the process. */
+	stoppedByControl?: boolean;
 }
 
 export interface AgentProcessOptions {
@@ -140,9 +143,27 @@ export class AgentProcess {
 	private settleCount = 0;
 	private readonly processId = randomUUID();
 
-	/** Capture before asynchronous output/stat reads; a later wake has another id. */
+	private readonly initialTurn: { sequence: number; completion?: Promise<AgentCompletion>; output?: string } = {
+		sequence: 1,
+	};
+	private turn = this.initialTurn;
+	private stopPromise: Promise<void> | undefined;
+	private streaming: AssistantStream | undefined;
+	private sessionInfoReady: Promise<void> = Promise.resolve();
+
+	/** Turn identity changes on acceptance, not only when the next turn settles. */
 	get completionId(): string {
-		return `${this.processId}:${this.settleCount}`;
+		return `${this.processId}:${this.turn.sequence}`;
+	}
+
+	isCurrentCompletion(completion: AgentCompletion): boolean {
+		return completion.completionId === this.completionId;
+	}
+
+	/** The immutable settlement captured before an onIdle callback or waiter runs. */
+	completionSnapshot(): Promise<AgentCompletion> {
+		if (!this.turn.completion) return Promise.reject(new Error("Agent turn has not settled"));
+		return this.turn.completion;
 	}
 	/** settleCount observed at the last awaitSettled() call. */
 	private lastSettledCount = 0;
@@ -191,8 +212,7 @@ export class AgentProcess {
 		if (options.model) args.push("--model", options.model);
 		if (options.thinking) args.push("--thinking", options.thinking);
 		// agent_send is the child's channel to @parent: an allowlist never removes it.
-		if (options.tools && options.tools.length > 0)
-			args.push("--tools", [...new Set([...options.tools, "agent_send"])].join(","));
+		if (options.tools !== undefined) args.push("--tools", [...new Set([...options.tools, "agent_send"])].join(","));
 		if (options.resumeSession) {
 			// Revive: the session file already carries its name, model and thinking.
 			args.push("--session", options.resumeSession);
@@ -213,10 +233,15 @@ export class AgentProcess {
 			},
 			onExit: () => {
 				this.clearWakeClock();
-				// Died in the middle of a woken turn (a crash — deliberate stops
-				// mark the status first): the turn failed and must be reported.
-				if (this.done && this.persistent && this.status === "running") this.finishWake("failed");
-				// Process died (any reason): release everyone waiting on settle.
+				// An exit without settlement is a crash, including signal exits
+				// whose numeric exitCode is null (and premature code-zero exits).
+				if (!this.turn.completion && this.status !== "stopped") {
+					if (this.done && this.persistent && this.status === "running") this.finishWake("failed");
+					else {
+						this.status = "failed";
+						this.captureCompletion("failed");
+					}
+				}
 				this.settle();
 				this.done = true;
 				options.onExit?.();
@@ -234,27 +259,42 @@ export class AgentProcess {
 		prompt: string,
 		origin: "parent" | "user" = "parent",
 	): Promise<{ ok: true } | { ok: false; error: string }> {
-		const response = await this.client.sendCommand({ type: "prompt", message: prompt }).catch((err: Error) => ({
+		let accepted = false;
+		const accept = (response: RpcResponse) => {
+			if (accepted || !response.success || this.isHandled(response)) return;
+			accepted = true;
+			this.parentWaiting = origin === "parent";
+			if (!this.turn.completion && this.status !== "stopped") this.status = "running";
+			this.sessionInfoReady = this.sendData<{ sessionFile?: string; sessionId?: string }>({ type: "get_state" }).then(
+				(data) => {
+					if (data) {
+						this.sessionPath = data.sessionFile ?? this.sessionPath;
+						this.sessionId = data.sessionId;
+					}
+				},
+			);
+		};
+		const response = await this.client.sendCommand({ type: "prompt", message: prompt }, accept).catch((err: Error) => ({
 			type: "response" as const,
 			command: "prompt",
 			success: false as const,
 			error: err.message,
 		}));
 
-		if (!response.success) {
-			this.status = "failed";
-			return { ok: false, error: response.error };
+		if (!response.success || this.isHandled(response)) {
+			if (this.status !== "stopped") this.status = "failed";
+			return {
+				ok: false,
+				error: response.success ? "Prompt was handled without starting an agent turn" : response.error,
+			};
 		}
+		// Structural test clients may not implement the synchronous response hook.
+		accept(response);
 
-		// Best-effort session info for the notification / attach (issue #10).
-		const data = await this.sendData<{ sessionFile?: string; sessionId?: string }>({ type: "get_state" });
-		if (data) {
-			this.sessionPath = data.sessionFile;
-			this.sessionId = data.sessionId;
-		}
+		// An instant settlement can precede this read; its snapshot also waits
+		// for the same best-effort session metadata, not another mutable query.
+		await this.sessionInfoReady;
 
-		this.status = "running";
-		this.parentWaiting = origin === "parent";
 		return { ok: true };
 	}
 
@@ -271,26 +311,36 @@ export class AgentProcess {
 	 * agent flips it back to running and starts a new turn.
 	 */
 	async sendMessage(text: string, origin: "parent" | "user" = "parent"): Promise<boolean> {
+		if (this.status === "failed" || this.status === "stopped" || this.client.isClosed) return false;
+		let accepted = false;
+		const accept = (response: RpcResponse) => {
+			if (accepted || !response.success || this.isHandled(response)) return;
+			accepted = true;
+			if (this.status === "completed") {
+				this.turn = { sequence: this.turn.sequence + 1 };
+				this.agentError = null;
+				this.status = "running";
+				this.parentWaiting = origin === "parent";
+				this.startWakeClock();
+			} else if (origin === "parent") {
+				this.parentWaiting = true;
+			}
+		};
 		const response = await this.client
-			.sendCommand({ type: "prompt", message: text, streamingBehavior: "steer" })
+			.sendCommand({ type: "prompt", message: text, streamingBehavior: "steer" }, accept)
 			.catch((err: Error) => ({
 				type: "response" as const,
 				command: "prompt" as const,
 				success: false as const,
 				error: err.message,
 			}));
-		if (!response.success) return false;
-		// Ownership is recorded only once the child accepted the message: the
-		// accepted prompt is what starts (or joins) the turn it belongs to.
-		if (this.status === "completed") {
-			// Woke an idle persistent agent — a new turn starts.
-			this.status = "running";
-			this.parentWaiting = origin === "parent";
-			this.startWakeClock();
-		} else if (origin === "parent") {
-			this.parentWaiting = true;
-		}
+		if (!response.success || this.isHandled(response)) return false;
+		accept(response);
 		return true;
+	}
+
+	private isHandled(response: RpcResponse): boolean {
+		return response.success && (response.data as { disposition?: string } | undefined)?.disposition === "handled";
 	}
 
 	/** Whether the parent is waiting for the current (or just-settled) turn's answer. */
@@ -313,6 +363,11 @@ export class AgentProcess {
 	async getMessages(): Promise<unknown[] | null> {
 		const data = await this.sendData<{ messages?: unknown[] }>({ type: "get_messages" });
 		return data?.messages ?? null;
+	}
+
+	/** Independent live assistant snapshot for a view opened mid-stream. */
+	getStreamingSnapshot(): AssistantStreamSnapshot | undefined {
+		return this.streaming?.snapshot();
 	}
 
 	/** Whether the child process is still up (running or resident idle). */
@@ -362,7 +417,8 @@ export class AgentProcess {
 	}
 
 	/**
-	 * Wait until the agent reaches a terminal state.
+	 * Wait for the spawn's initial turn, even if a resident already woke.
+	 * Follow-up settlements are read through completionSnapshot().
 	 *
 	 * The wait is bounded by the overall deadline: a child stuck in a hung
 	 * model call would otherwise make us wait forever (issue #10:
@@ -371,64 +427,25 @@ export class AgentProcess {
 	 * to settle, then hard-stop it.
 	 */
 	async waitForCompletion(): Promise<AgentCompletion> {
-		// No deadline when timeoutMs is omitted — the child runs until it
-		// settles or is stopped (no token limit exists). `deadline` stays
-		// undefined so `remaining` is undefined and awaitSettled waits forever
-		// (its own `timeoutMs !== undefined` guard skips the timer).
-		const deadline = this.timeoutMs === undefined ? undefined : Date.now() + this.timeoutMs;
-
-		// Wait for the first settle to resolve, the child to exit (onExit flips
-		// `done`), or the deadline. A deadline with neither is outright stuck:
-		// abort and give the child a bound to settle, hard-stopping if it can't.
-		if (this.status === "running" && !this.done) {
-			const remaining = deadline === undefined ? undefined : Math.max(0, deadline - Date.now());
-			const settled = await this.awaitSettled(remaining);
-			if (!this.done && !settled) {
+		// Bind before spawn/preflight: a fast initial settlement can be followed
+		// by a view wake while spawnAndSend still awaits session metadata.
+		const turn = this.initialTurn;
+		if (!turn.completion && this.status === "running") {
+			const settled = await this.awaitSettled(this.timeoutMs);
+			if (!turn.completion && !settled && turn === this.turn) {
 				this.hardAborted = true;
 				await this.abortAndWait();
 			}
 		}
-
-		this.done = true;
-		if (this.status === "stopped") {
-			// Already stopped externally (agent_stop) — keep it.
-		} else if (this.hardAborted) {
-			this.status = "stopped";
-		} else if (this.agentError) {
-			this.status = "failed";
-		} else if (this.client.exitCode !== null && this.client.exitCode !== 0) {
-			this.status = "failed";
-		} else {
-			this.status = "completed";
+		if (!turn.completion) {
+			if (turn !== this.turn) throw new Error("Agent turn changed without settling");
+			const status = this.terminalStatus();
+			this.captureCompletion(status);
+			this.status = status;
+			this.done = true;
 		}
-
-		// A failed child usually leaves empty terminal text; the real root cause
-		// lives in the model error (agentError) or the stderr the RpcClient
-		// captured before exit — surface it instead of a blank "Sub-agent failed."
-		const completionId = this.completionId;
-		// Read before awaiting: a wake starting meanwhile would reset it.
-		const owedToParent = this.parentWaiting;
-		const output = await this.lastOutput();
-		const finalOutput =
-			this.agentError && !output.trim()
-				? this.agentError
-				: this.status === "failed" && !output.trim()
-					? this.client.stderrText
-					: output;
-		const stats = await this.getStats();
-		return {
-			completionId,
-			status: this.status,
-			output: finalOutput,
-			stats: {
-				tokens: stats?.tokens ?? 0,
-				toolUses: stats?.toolUses ?? 0,
-				durationMs: Date.now() - this.startedAt,
-			},
-			sessionPath: this.sessionPath,
-			sessionId: this.sessionId,
-			owedToParent,
-		};
+		if (!turn.completion) throw new Error("Agent settlement snapshot was not captured");
+		return turn.completion;
 	}
 
 	/**
@@ -438,28 +455,41 @@ export class AgentProcess {
 	 */
 	async stop(): Promise<void> {
 		this.clearWakeClock();
-		if (this.done) {
-			// A resident agent. Stopping it mid-wake is a deliberate stop of
-			// that turn; idle, it just ends the process.
-			if (this.status === "running") {
-				this.stoppedByControl = true;
-				this.status = "stopped";
-			}
-			this.client.endInput();
-			return;
-		}
-		this.stoppedByControl = true;
+		// Closing an already idle resident does not retract its completed turn.
+		if (!this.done || this.status === "running") this.stoppedByControl = true;
 		await this.hardStop();
 	}
 
 	/** stdin EOF + SIGTERM fallback; waits for the child to exit. */
-	private async hardStop(): Promise<void> {
+	private hardStop(): Promise<void> {
+		if (this.stopPromise) return this.stopPromise;
+		if (!this.turn.completion) this.captureCompletion("stopped");
 		this.status = "stopped";
 		this.done = true;
 		this.client.endInput();
 		this.settle();
-		await Promise.race([this.client.waitForExit(), new Promise((resolve) => setTimeout(resolve, STOP_GRACE_MS))]);
-		if (!this.client.isClosed) this.client.kill("SIGTERM");
+		this.stopPromise = (async () => {
+			if (await this.waitForExitWithin(STOP_GRACE_MS)) return;
+			this.client.kill("SIGTERM");
+			if (await this.waitForExitWithin(STOP_GRACE_MS)) return;
+			this.client.kill("SIGKILL");
+			await this.client.waitForExit();
+		})();
+		return this.stopPromise;
+	}
+
+	private async waitForExitWithin(ms: number): Promise<boolean> {
+		let timer: NodeJS.Timeout | undefined;
+		try {
+			return await Promise.race([
+				this.client.waitForExit().then(() => true),
+				new Promise<false>((resolve) => {
+					timer = setTimeout(() => resolve(false), ms);
+				}),
+			]);
+		} finally {
+			if (timer) clearTimeout(timer);
+		}
 	}
 
 	/** Latest activity excerpt for the widget (undefined until the first message_update). */
@@ -485,7 +515,61 @@ export class AgentProcess {
 	private readonly onTreeEvent: ((event: AgentTreeEvent) => void) | undefined;
 	private readonly onIdle: ((outcome: WakeOutcome) => void) | undefined;
 
+	private terminalStatus(): TerminalStatus {
+		if (this.status === "stopped" || this.hardAborted || this.wakeTimedOut) return "stopped";
+		if (this.agentError || this.status === "failed") return "failed";
+		return "completed";
+	}
+
+	private captureCompletion(status: TerminalStatus): Promise<AgentCompletion> {
+		const turn = this.turn;
+		if (turn.completion) return turn.completion;
+		const completionId = this.completionId;
+		const owedToParent = this.parentWaiting;
+		const stoppedByControl = this.stoppedByControl;
+		const durationMs = Date.now() - this.turnStartedAt;
+		const error =
+			this.agentError ||
+			this.client.stderrText.trim() ||
+			(this.client.exitSignal
+				? `pi exited (${this.client.exitSignal})`
+				: this.client.isClosed
+					? `pi exited before settling (code ${this.client.exitCode})`
+					: "");
+		const finalText = turn.output;
+		// Queue BOTH reads now, before publishing idle or invoking a callback.
+		// Later prompt writes cannot overtake these synchronous RPC requests.
+		const outputRead = finalText === undefined ? this.lastOutput() : Promise.resolve(finalText);
+		const statsRead = this.getStats();
+		turn.completion = Promise.all([outputRead, statsRead, this.sessionInfoReady]).then(([output, stats]) => ({
+			completionId,
+			status,
+			output: status === "failed" && !output.trim() ? error : output,
+			stats: { tokens: stats?.tokens ?? 0, toolUses: stats?.toolUses ?? 0, durationMs },
+			sessionPath: this.sessionPath,
+			sessionId: this.sessionId,
+			owedToParent,
+			stoppedByControl,
+		}));
+		return turn.completion;
+	}
+
 	private onEvent(event: RpcEvent): void {
+		if (event.type === "message_start" && (event.message as { role?: string } | undefined)?.role === "assistant") {
+			this.streaming = new AssistantStream(event.message as AssistantMessage);
+		} else if (event.type === "message_update") {
+			this.streaming?.apply(event.assistantMessageEvent);
+		}
+		if (event.type === "message_end") {
+			const message = event.message as { role?: string; content?: Array<{ type?: string; text?: string }> } | undefined;
+			if (message?.role === "assistant" && Array.isArray(message.content)) {
+				this.streaming = undefined;
+				this.turn.output = message.content
+					.filter((block) => block.type === "text")
+					.map((block) => block.text ?? "")
+					.join("");
+			}
+		}
 		// Raw protocol shapes are interpreted in event-interpret.ts — the only
 		// place pi's event vocabulary is mapped onto ours. Since v0.84.0 the
 		// wire carries only assistantMessageEvent deltas, so each event maps to
@@ -494,16 +578,17 @@ export class AgentProcess {
 		// message delivery.
 		for (const ev of interpretEvent(event)) {
 			switch (ev.type) {
-				case "settled":
+				case "settled": {
+					const wake = this.done && this.persistent && this.status === "running";
+					const status = this.terminalStatus();
+					this.captureCompletion(status);
+					this.status = status;
+					this.done = true;
+					this.clearWakeClock();
 					this.settle();
-					// Persistent agent woke by sendMessage finished its follow-up
-					// turn — completed goes back to idle; a model error or the
-					// turn limit is reported honestly (never disguised as idle).
-					if (this.done && this.persistent && this.status === "running") {
-						this.clearWakeClock();
-						this.finishWake(this.agentError ? "failed" : this.wakeTimedOut ? "stopped" : "completed");
-					}
+					if (wake) this.finishWake(status);
 					break;
+				}
 				case "thinking":
 					// Collapse consecutive thinking deltas into one marker.
 					if (this.events[this.events.length - 1]?.kind !== "thinking") {
@@ -555,6 +640,7 @@ export class AgentProcess {
 	}
 
 	private finishWake(outcome: WakeOutcome): void {
+		this.captureCompletion(outcome);
 		this.status = outcome;
 		this.onIdle?.(outcome);
 	}
@@ -562,6 +648,7 @@ export class AgentProcess {
 	/** A wake starts a new turn: restart the turn clock and its timeoutMs limit. */
 	private startWakeClock(): void {
 		this.clearWakeClock();
+		this.lastSettledCount = this.settleCount;
 		this.turnStartedAt = Date.now();
 		this.wakeTimedOut = false;
 		if (this.timeoutMs !== undefined) this.wakeTimer = setTimeout(() => void this.expireWake(), this.timeoutMs);
@@ -608,7 +695,7 @@ export class AgentProcess {
 	 * late settle can't double-resolve.
 	 */
 	private awaitSettled(timeoutMs?: number): Promise<boolean> {
-		if (this.done) return Promise.resolve(true);
+		if (this.turn.completion) return Promise.resolve(true);
 		// A settle arrived since our last wait — pass through immediately.
 		if (this.settleCount > this.lastSettledCount) {
 			this.lastSettledCount = this.settleCount;

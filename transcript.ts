@@ -18,6 +18,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { type Component, Container, Spacer, type TUI } from "@earendil-works/pi-tui";
 import { dataCard, textLine } from "./ui/card.js";
+import { disposeToolViewAnimation } from "./ui/view.js";
 
 /** Structural subset of pi's AgentMessage that the replay reads. */
 interface ReplayMessage {
@@ -49,72 +50,120 @@ export function userText(content: unknown): string {
 		.join("\n");
 }
 
+/** Owns renderer clocks for one replay, not the tools/processes being displayed. */
+export class Transcript extends Container {
+	private readonly rendererStates = new Set<object>();
+	private disposed = false;
+
+	trackRenderers(renderers: ToolRenderers | undefined): ToolRenderers | undefined {
+		if (!renderers) return undefined;
+		const track = (state: unknown) => {
+			if (state && typeof state === "object") this.rendererStates.add(state);
+		};
+		const call = renderers.renderCall;
+		const result = renderers.renderResult;
+		return {
+			...renderers,
+			renderCall: call
+				? (args, theme, context) => {
+						if (this.disposed) return textLine("");
+						track(context.state);
+						return call(args, theme, context);
+					}
+				: undefined,
+			renderResult: result
+				? (value, options, theme, context) => {
+						if (this.disposed) return textLine("");
+						track(context.state);
+						return result(value, options, theme, context);
+					}
+				: undefined,
+		};
+	}
+
+	dispose(): void {
+		if (this.disposed) return;
+		this.disposed = true;
+		// Pi 1.1's ToolExecutionComponent has no disposal hook. Release only
+		// clocks registered by our views via their public renderer contexts;
+		// never fabricate an aborted result to force a terminal render.
+		for (const state of this.rendererStates) disposeToolViewAnimation(state);
+		this.rendererStates.clear();
+		this.clear();
+	}
+}
+
 /** One container holding the whole replayed conversation. */
-export function buildTranscript(messages: readonly unknown[], opts: TranscriptOptions): Container {
-	const chat = new Container();
+export function buildTranscript(messages: readonly unknown[], opts: TranscriptOptions): Transcript {
+	const chat = new Transcript();
 	const markdownTheme = getMarkdownTheme();
 	const pending = new Map<string, ToolExecutionComponent>();
 	const add = (component: Component) => chat.addChild(component);
 
-	for (const raw of messages) {
-		const message = raw as ReplayMessage;
-		switch (message.role) {
-			case "user": {
-				const text = userText(message.content);
-				if (!text) break;
-				if (chat.children.length > 0) add(new Spacer(1));
-				add(new UserMessageComponent(text, markdownTheme));
-				break;
-			}
-			case "assistant": {
-				add(new AssistantMessageComponent(message as unknown as AssistantMessage, false, markdownTheme));
-				const failed = message.stopReason === "aborted" || message.stopReason === "error";
-				for (const block of (message.content ?? []) as {
-					type?: string;
-					id?: string;
-					name?: string;
-					arguments?: unknown;
-				}[]) {
-					if (block.type !== "toolCall" || !block.id || !block.name) continue;
-					const component = new ToolExecutionComponent(
-						block.name,
-						block.id,
-						block.arguments ?? {},
-						{ showImages: false },
-						opts.renderers(block.name),
-						opts.tui,
-						opts.cwd,
-					);
+	try {
+		for (const raw of messages) {
+			const message = raw as ReplayMessage;
+			switch (message.role) {
+				case "user": {
+					const text = userText(message.content);
+					if (!text) break;
+					if (chat.children.length > 0) add(new Spacer(1));
+					add(new UserMessageComponent(text, markdownTheme));
+					break;
+				}
+				case "assistant": {
+					add(new AssistantMessageComponent(message as unknown as AssistantMessage, false, markdownTheme));
+					const failed = message.stopReason === "aborted" || message.stopReason === "error";
+					for (const block of (message.content ?? []) as {
+						type?: string;
+						id?: string;
+						name?: string;
+						arguments?: unknown;
+					}[]) {
+						if (block.type !== "toolCall" || !block.id || !block.name) continue;
+						const component = new ToolExecutionComponent(
+							block.name,
+							block.id,
+							block.arguments ?? {},
+							{ showImages: false },
+							chat.trackRenderers(opts.renderers(block.name)),
+							opts.tui,
+							opts.cwd,
+						);
+						component.setExpanded(opts.expanded);
+						add(component);
+						if (failed) {
+							const text = message.stopReason === "aborted" ? "Operation aborted" : message.errorMessage || "Error";
+							component.updateResult({ content: [{ type: "text", text }], isError: true });
+						} else {
+							pending.set(block.id, component);
+						}
+					}
+					break;
+				}
+				case "toolResult": {
+					const component = message.toolCallId ? pending.get(message.toolCallId) : undefined;
+					if (!component) break;
+					component.updateResult({
+						content: (message.content ?? []) as { type: string; text?: string }[],
+						details: message.details,
+						isError: message.isError ?? false,
+					});
+					pending.delete(message.toolCallId as string);
+					break;
+				}
+				case "custom": {
+					if (!message.display) break;
+					const component = new CustomMessageComponent(message as never, undefined, markdownTheme);
 					component.setExpanded(opts.expanded);
 					add(component);
-					if (failed) {
-						const text = message.stopReason === "aborted" ? "Operation aborted" : message.errorMessage || "Error";
-						component.updateResult({ content: [{ type: "text", text }], isError: true });
-					} else {
-						pending.set(block.id, component);
-					}
+					break;
 				}
-				break;
-			}
-			case "toolResult": {
-				const component = message.toolCallId ? pending.get(message.toolCallId) : undefined;
-				if (!component) break;
-				component.updateResult({
-					content: (message.content ?? []) as { type: string; text?: string }[],
-					details: message.details,
-					isError: message.isError ?? false,
-				});
-				pending.delete(message.toolCallId as string);
-				break;
-			}
-			case "custom": {
-				if (!message.display) break;
-				const component = new CustomMessageComponent(message as never, undefined, markdownTheme);
-				component.setExpanded(opts.expanded);
-				add(component);
-				break;
 			}
 		}
+	} catch (error) {
+		chat.dispose();
+		throw error;
 	}
 	return chat;
 }

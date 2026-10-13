@@ -32,6 +32,9 @@ export interface RegisteredAgent {
 	/** Deliver one in-tree message to this agent (AgentProcess.sendMessage). */
 	sendMessage?: (text: string) => Promise<boolean>;
 	stoppedByControl: boolean;
+	readonly status?: "queued" | "running" | "completed" | "failed" | "stopped";
+	/** A newer accepted turn must not be cleaned up by an old settlement. */
+	isCurrentCompletion?: (completion: AgentCompletion) => boolean;
 	stop(): Promise<void>;
 }
 
@@ -98,6 +101,11 @@ export class AgentRegistry {
 		return this.agents.get(agentId);
 	}
 
+	/** Release an exited instance without stopping it or discarding its pending result. */
+	removeExited(agent: RegisteredAgent, result?: WidgetResult): void {
+		this.remove(agent.agentId, result, agent);
+	}
+
 	/**
 	 * Completion policy + cleanup, single choke point. Notifies unless the
 	 * stop was user-controlled; always removes the bookkeeping and stops the
@@ -107,7 +115,8 @@ export class AgentRegistry {
 	 * removes it later.
 	 */
 	async complete(agent: RegisteredAgent, completion: AgentCompletion): Promise<void> {
-		const notify = () => (agent.stoppedByControl ? Promise.resolve() : this.notify(agent, completion));
+		const notify = () =>
+			(completion.stoppedByControl ?? agent.stoppedByControl) ? Promise.resolve() : this.notify(agent, completion);
 		if (agent.persistent && completion.status === "completed") {
 			try {
 				// A failed notification must never kill a resident agent — the
@@ -116,15 +125,23 @@ export class AgentRegistry {
 			} finally {
 				// Resident — no remove, no stop. The widget row flips to idle so
 				// the agent stays addressable (agent_stop removes it later).
-				this.getWidget()?.setStatus?.(agent.agentId, "idle");
+				if (
+					this.agents.get(agent.agentId) === agent &&
+					this.isCurrent(agent, completion) &&
+					(!agent.status || agent.status === "completed")
+				) {
+					this.getWidget()?.setStatus?.(agent.agentId, "idle");
+				}
 			}
 			return;
 		}
 		try {
 			await notify();
 		} finally {
-			this.remove(agent.agentId, completion.status === "completed" ? "done" : completion.status);
-			await agent.stop().catch(() => {});
+			if (this.isCurrent(agent, completion)) {
+				this.remove(agent.agentId, completion.status === "completed" ? "done" : completion.status, agent);
+				await agent.stop().catch(() => {});
+			}
 		}
 	}
 
@@ -144,12 +161,17 @@ export class AgentRegistry {
 		const ok = await agent.sendMessage(text);
 		// A delivered message woke an idle persistent agent — the widget row
 		// flips back to running (spinner resumes). Harmless for running rows.
-		if (ok) this.getWidget()?.setStatus?.(target, "running");
+		if (ok && this.agents.get(target) === agent && (!agent.status || agent.status === "running")) {
+			this.getWidget()?.setStatus?.(target, "running");
+		}
 		return ok;
 	}
 
 	/** Flip a persistent agent's widget row back to idle (wake finished). */
-	markIdle(agentId: string): void {
+	markIdle(agentId: string, completion?: AgentCompletion): void {
+		const agent = this.agents.get(agentId);
+		if (!agent || (completion && !this.isCurrent(agent, completion)) || (agent.status && agent.status !== "completed"))
+			return;
 		this.getWidget()?.setStatus?.(agentId, "idle");
 	}
 
@@ -159,24 +181,32 @@ export class AgentRegistry {
 	 *  caller (agent_stop.execute) surfaces it as a tool error.
 	 *  `result` is the row's end state: a failed
 	 *  follow-up turn is cleaned up here too and must not read "stopped". */
-	async stopAndRemove(agentId: string, result: WidgetResult = "stopped"): Promise<boolean> {
+	async stopAndRemove(
+		agentId: string,
+		result: WidgetResult = "stopped",
+		completion?: AgentCompletion,
+	): Promise<boolean> {
 		const agent = this.agents.get(agentId);
-		if (!agent) return false;
+		if (!agent || (completion && !this.isCurrent(agent, completion))) return false;
 		await agent.stop();
-		this.remove(agentId, result);
+		this.remove(agentId, result, agent);
 		return true;
 	}
 
 	/** Stop everything (session shutdown). */
 	async shutdown(): Promise<void> {
-		for (const agent of this.agents.values()) {
-			void agent.stop();
-		}
+		const agents = [...this.agents.values()];
 		this.agents.clear();
 		this.getWidget()?.dispose();
+		await Promise.all(agents.map((agent) => agent.stop().catch(() => {})));
 	}
 
-	private remove(agentId: string, result?: WidgetResult): void {
+	private isCurrent(agent: RegisteredAgent, completion: AgentCompletion): boolean {
+		return agent.isCurrentCompletion?.(completion) ?? true;
+	}
+
+	private remove(agentId: string, result?: WidgetResult, expected?: RegisteredAgent): void {
+		if (expected && this.agents.get(agentId) !== expected) return;
 		// Only touch the widget for agents we actually tracked — a spawn-
 		// failure completion never registered, so delete() returns false and
 		// the widget stays untouched (no spurious requestRender).

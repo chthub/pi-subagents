@@ -22,9 +22,10 @@ function host() {
 	const handlers = new Map<string, (event: never, ctx: ExtensionContext) => unknown>();
 	const sent: { notice: CompletionNotice; triggerTurn: boolean; deliverAs?: string }[] = [];
 	let idle = true;
+	let compacting = false;
 	let controller = new AbortController();
 	const ctx = {
-		isIdle: () => idle,
+		isIdle: () => idle && !compacting,
 		get signal() {
 			return controller.signal;
 		},
@@ -42,6 +43,15 @@ function host() {
 		sent,
 		capture: inbox.capture,
 		fire,
+		compact: () => {
+			compacting = true;
+		},
+		finishCompact: (outcome: "completed" | "cancelled" | "failed") => {
+			compacting = false;
+			fire(outcome === "completed" ? "session_compact" : "session_compact_failed", {
+				aborted: outcome === "cancelled",
+			});
+		},
 		start: () => {
 			idle = false;
 			controller = new AbortController();
@@ -236,6 +246,44 @@ test("successful settlement wakes once for a result arriving after pre-settle", 
 	assert.deepEqual(
 		h.sent.map((s) => s.triggerTurn),
 		[true],
+	);
+});
+
+for (const outcome of ["completed", "cancelled", "failed"] as const) {
+	test(`${outcome} compaction flushes results that arrived while the idle parent was compacting`, async () => {
+		const h = host();
+		h.compact();
+		const deliver = h.capture();
+		deliver(notice("max:1"));
+		deliver(notice("zoe:1"));
+		await tick();
+		assert.equal(h.sent.length, 0);
+		h.finishCompact(outcome);
+		await tick();
+		assert.deepEqual(
+			h.sent.map((s) => s.notice.details.completionId),
+			["max:1", "zoe:1"],
+		);
+		assert.deepEqual(
+			h.sent.map((s) => s.triggerTurn),
+			[false, true],
+		);
+	});
+}
+
+test("failed compaction does not clear suspension after a parent abort", async () => {
+	const h = host();
+	h.start();
+	h.boundary("turn_end", "aborted");
+	h.settle(true);
+	h.compact();
+	h.capture()(notice("max:1"));
+	await tick();
+	h.finishCompact("failed");
+	await tick();
+	assert.deepEqual(
+		h.sent.map((s) => s.triggerTurn),
+		[false],
 	);
 });
 

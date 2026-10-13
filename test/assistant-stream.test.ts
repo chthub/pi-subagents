@@ -97,3 +97,27 @@ test("unknown events and invalid indices cannot corrupt renderer content", () =>
 		assert.equal(stream.apply(raw), false);
 	assert.deepEqual(stream.message.content, []);
 });
+
+test("late-subscriber snapshots preserve sparse wire indices and are detached", () => {
+	const live = new AssistantStream(message());
+	live.apply({ type: "text_delta", contentIndex: 2, delta: "before open" });
+	live.apply({ type: "thinking_delta", contentIndex: 0, delta: "thought" });
+	const snapshot = live.snapshot();
+	assert.deepEqual(snapshot.contentIndices, [0, 2]);
+	const late = new AssistantStream(snapshot.message, snapshot.contentIndices);
+	late.apply({ type: "text_delta", contentIndex: 2, delta: " after open" });
+	assert.deepEqual(late.message.content, [
+		{ type: "thinking", thinking: "thought" },
+		{ type: "text", text: "before open after open" },
+	]);
+	assert.deepEqual(live.message.content, [
+		{ type: "thinking", thinking: "thought" },
+		{ type: "text", text: "before open" },
+	]);
+	snapshot.contentIndices[0] = 50;
+	const text = snapshot.message.content[1];
+	assert.equal(text.type, "text");
+	if (text.type === "text") text.text = "mutated";
+	assert.deepEqual(live.snapshot().contentIndices, [0, 2]);
+	assert.deepEqual(live.message.content[1], { type: "text", text: "before open" });
+});

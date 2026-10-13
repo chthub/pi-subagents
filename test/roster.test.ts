@@ -46,6 +46,29 @@ describe("rosterFromMessages — the roster a transcript describes", () => {
 		assert.equal(byId.kai.status, "failed");
 	});
 
+	it("stopping a completed resident preserves stop over later-delivered results", () => {
+		const entries = rosterFromMessages([
+			spawnCall("c1", { label: "resident" }),
+			spawnResult("c1", { agentId: "zoe", runInBackground: true }),
+			{
+				role: "custom",
+				customType: "subagent-notification",
+				details: { agent_id: "zoe", status: "completed", idle: true },
+				timestamp: 2000,
+			},
+			{ role: "toolResult", toolName: "agent_stop", details: { agentId: "zoe" }, timestamp: 3000 },
+			{
+				role: "custom",
+				customType: "subagent-notification",
+				details: { agent_id: "zoe", status: "completed", sessionPath: "/s/zoe.jsonl" },
+				timestamp: 4000,
+			},
+		]);
+		assert.equal(entries[0]?.status, "stopped");
+		assert.equal(entries[0]?.endedAt, 3000);
+		assert.equal(entries[0]?.sessionPath, "/s/zoe.jsonl");
+	});
+
 	it("a background agent with no notification yet was taken down with the old process: stopped", () => {
 		const entries = rosterFromMessages([
 			spawnCall("c1", { label: "bg" }),

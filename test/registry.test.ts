@@ -162,8 +162,9 @@ describe("AgentRegistry — completion policy", () => {
 		const { registry, notified } = makeRegistry();
 		const agent = new FakeAgent("a1");
 		registry.register(agent);
+		agent.stoppedByControl = true; // A later cleanup must not replace the limit's policy.
 
-		await registry.complete(agent, completion({ status: "stopped" }));
+		await registry.complete(agent, completion({ status: "stopped", stoppedByControl: false }));
 
 		assert.deepEqual(notified, [{ agentId: "a1", status: "stopped" }]);
 	});
@@ -243,6 +244,77 @@ describe("AgentRegistry — persistent (idle) completion", () => {
 		registry.register(agent);
 		await registry.complete(agent, completion());
 		assert.deepEqual(widget?.statuses, []);
+	});
+});
+
+describe("AgentRegistry — stale settlement guards", () => {
+	it("reports an old completed turn without idling a newly accepted wake", async () => {
+		let release!: () => void;
+		const widget = new FakeWidget();
+		const registry = new AgentRegistry({
+			notify: () =>
+				new Promise<void>((resolve) => {
+					release = resolve;
+				}),
+			getWidget: () => widget,
+		});
+		const agent = new FakeAgent("a1", "stay", true) as FakeAgent & {
+			current: string;
+			status: "completed" | "running";
+			isCurrentCompletion: (c: AgentCompletion) => boolean;
+		};
+		agent.current = "test:1";
+		agent.status = "completed";
+		agent.isCurrentCompletion = (c) => c.completionId === agent.current;
+		registry.register(agent);
+		const finishing = registry.complete(agent, completion());
+		agent.current = "test:2";
+		agent.status = "running";
+		release();
+		await finishing;
+		assert.equal(registry.lookup("a1"), agent);
+		assert.equal(agent.stopCalls, 0);
+		assert.deepEqual(widget.statuses, []);
+	});
+
+	it("an old failed completion cannot remove or stop a newer turn", async () => {
+		const { registry, widget, notified } = makeRegistry();
+		const agent = new FakeAgent("a1", "stay", true) as FakeAgent & {
+			isCurrentCompletion: (c: AgentCompletion) => boolean;
+		};
+		agent.isCurrentCompletion = () => false;
+		registry.register(agent);
+		await registry.complete(agent, completion({ status: "failed" }));
+		assert.deepEqual(notified, [{ agentId: "a1", status: "failed" }]);
+		assert.equal(registry.lookup("a1"), agent);
+		assert.equal(agent.stopCalls, 0);
+		assert.deepEqual(widget?.removed, []);
+		registry.markIdle("a1", completion());
+		assert.deepEqual(widget?.statuses, []);
+		assert.equal(await registry.stopAndRemove("a1", "failed", completion()), false);
+	});
+
+	it("a late cleanup does not remove a replacement process sharing the address", async () => {
+		let release!: () => void;
+		const widget = new FakeWidget();
+		const registry = new AgentRegistry({
+			notify: () =>
+				new Promise<void>((resolve) => {
+					release = resolve;
+				}),
+			getWidget: () => widget,
+		});
+		const old = new FakeAgent("a1");
+		const replacement = new FakeAgent("a1", "new", true);
+		registry.register(old);
+		const finishing = registry.complete(old, completion({ status: "failed" }));
+		registry.register(replacement);
+		release();
+		await finishing;
+		assert.equal(registry.lookup("a1"), replacement);
+		assert.equal(replacement.stopCalls, 0);
+		assert.deepEqual(widget.removed, []);
+		assert.equal(old.stopCalls, 1);
 	});
 });
 
@@ -327,6 +399,49 @@ describe("AgentRegistry — in-tree routing", () => {
 		assert.equal(agent.stopCalls, 0, "resident survives a notification failure");
 		assert.equal(registry.lookup("a1"), agent);
 		assert.deepEqual(widget?.statuses, [{ id: "a1", status: "idle" }]);
+	});
+});
+
+describe("AgentRegistry — exited instances", () => {
+	it("releases an idle exited resident without stopping it or emitting a completion", () => {
+		const { registry, widget, notified } = makeRegistry();
+		const agent = new FakeAgent("a1", "stay", true);
+		registry.register(agent, "idle");
+		registry.removeExited(agent, "done");
+		assert.equal(registry.lookup("a1"), undefined);
+		assert.deepEqual(widget?.results, ["done"]);
+		assert.equal(agent.stopCalls, 0);
+		assert.deepEqual(notified, []);
+	});
+
+	it("cannot remove a newer instance at the same address", () => {
+		const { registry, widget } = makeRegistry();
+		const old = new FakeAgent("a1", "old", true);
+		const replacement = new FakeAgent("a1", "new", true);
+		registry.register(old);
+		registry.register(replacement);
+		registry.removeExited(old, "done");
+		assert.equal(registry.lookup("a1"), replacement);
+		assert.deepEqual(widget?.removed, []);
+		assert.equal(replacement.stopCalls, 0);
+	});
+
+	it("bookkeeping release preserves a crashed turn's frozen failure notification", async () => {
+		const { registry, notified } = makeRegistry();
+		const agent = new FakeAgent("a1", "stay", true);
+		registry.register(agent);
+		registry.removeExited(agent, "failed");
+		agent.stoppedByControl = true; // A later process-level mutation cannot hide this settlement.
+		await registry.complete(agent, completion({ status: "failed", stoppedByControl: false }));
+		assert.deepEqual(notified, [{ agentId: "a1", status: "failed" }]);
+	});
+
+	it("a snapshot-controlled stop stays silent even if the live flag changed", async () => {
+		const { registry, notified } = makeRegistry();
+		const agent = new FakeAgent("a1", "stay", true);
+		registry.register(agent);
+		await registry.complete(agent, completion({ status: "stopped", stoppedByControl: true }));
+		assert.deepEqual(notified, []);
 	});
 });
 

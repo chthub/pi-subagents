@@ -171,6 +171,10 @@ export function rosterFromMessages(
 ): RosterEntry[] {
 	const args = new Map<string, SpawnArgs>();
 	const entries = new Map(initialEntries.map((entry) => [entry.agentId, structuredClone(entry)]));
+	// A snapshot records lifecycle changes when they happen; notifications may
+	// be appended much later by the inbox. Terminal snapshot state is therefore
+	// authoritative until a newer running/idle snapshot records an actual revive.
+	const terminalSnapshots = new Set(initialEntries.filter((entry) => isTerminal(entry.status)).map((e) => e.agentId));
 
 	for (const m of messages) {
 		if (m.role === "assistant" && Array.isArray(m.content)) {
@@ -223,6 +227,12 @@ export function rosterFromMessages(
 				};
 				entries.set(agentId, entry);
 			}
+			if (terminalSnapshots.has(agentId) || entry.status === "stopped") {
+				// Keep the result in transcript history and recover a missing attach
+				// path, but do not undo a newer stop/failure/completion or its time.
+				entry.sessionPath ??= d.sessionPath;
+				continue;
+			}
 			entry.status = d.status === "failed" ? "failed" : d.status === "stopped" ? "stopped" : "done";
 			entry.sessionPath = d.sessionPath ?? entry.sessionPath;
 			entry.endedAt = d.usage?.durationMs ? entry.startedAt + d.usage.durationMs : m.timestamp;
@@ -231,7 +241,9 @@ export function rosterFromMessages(
 		if (m.role === "toolResult" && m.toolName === "agent_stop") {
 			const d = (m.details ?? {}) as { agentId?: string; error?: string };
 			const entry = !m.isError && d.error === undefined && d.agentId ? entries.get(d.agentId) : undefined;
-			if (entry && !isTerminal(entry.status)) {
+			if (entry) {
+				// A successful stop is authoritative even when replay has already
+				// mapped a resident completion to done.
 				entry.status = "stopped";
 				entry.endedAt = m.timestamp;
 			}

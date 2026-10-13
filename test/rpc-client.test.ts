@@ -62,6 +62,45 @@ describe("RpcClient — command correlation", () => {
 	});
 });
 
+describe("RpcClient — acceptance and exit lifecycle", () => {
+	it("applies a response hook before later events in the same stdout chunk", async () => {
+		const order: string[] = [];
+		const client = makeClient({ onEvent: () => order.push("settled") });
+		try {
+			await client.sendCommand({ type: "response_then_settle" } as never, () => order.push("accepted"));
+			assert.deepEqual(order, ["accepted", "settled"]);
+		} finally {
+			await close(client);
+		}
+	});
+
+	it("can signal descendants holding pipes after the group leader has exited", async () => {
+		const client = makeClient();
+		try {
+			await client.sendCommand({ type: "leader_exit_with_child" } as never);
+			for (let i = 0; i < 100 && client.exitCode === null; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+			assert.equal(client.exitCode, 0);
+			assert.equal(client.isClosed, false, "the descendant still owns inherited output pipes");
+			client.kill("SIGTERM");
+			await client.waitForExit();
+			assert.equal(client.isClosed, true);
+		} finally {
+			client.kill("SIGKILL");
+			await client.waitForExit();
+		}
+	});
+
+	it("retains a terminating signal independently of the numeric exit code", async () => {
+		const client = makeClient();
+		await assert.rejects(client.sendCommand({ type: "signal_exit" } as never));
+		const exit = await client.waitForExit();
+		assert.equal(exit.code, null);
+		assert.equal(exit.signal, "SIGKILL");
+		assert.equal(client.exitCode, null);
+		assert.equal(client.exitSignal, "SIGKILL");
+	});
+});
+
 describe("RpcClient — UTF-8 framing", () => {
 	it("reassembles multibyte characters split across stdout chunks", async () => {
 		const client = makeClient();

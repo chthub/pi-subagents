@@ -9,6 +9,7 @@
 // Special command type "big_line" writes, in ONE stdout write, an agent_end
 // event padded to `size` characters followed by agent_settled and the
 // response — the shape of a real multi-MB run ending.
+import { spawn } from "node:child_process";
 import readline from "node:readline";
 
 const DELAYS = { get_state: 60, abort: 40 };
@@ -16,6 +17,22 @@ const DELAYS = { get_state: 60, abort: 40 };
 const rl = readline.createInterface({ input: process.stdin });
 rl.on("line", (line) => {
 	const cmd = JSON.parse(line);
+
+	if (cmd.type === "response_then_settle") {
+		process.stdout.write(`${JSON.stringify({ id: cmd.id, type: "response", command: cmd.type, success: true })}\n${JSON.stringify({ type: "agent_settled" })}\n`);
+		return;
+	}
+
+	if (cmd.type === "leader_exit_with_child") {
+		spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: ["ignore", "inherit", "inherit"] });
+		process.stdout.write(`${JSON.stringify({ id: cmd.id, type: "response", command: cmd.type, success: true })}\n`, () => process.exit(0));
+		return;
+	}
+
+	if (cmd.type === "signal_exit") {
+		process.kill(process.pid, "SIGKILL");
+		return;
+	}
 
 	if (cmd.type === "split_utf8") {
 		// Cut after the first byte of the second CJK character (three UTF-8 bytes): first chunk ends with

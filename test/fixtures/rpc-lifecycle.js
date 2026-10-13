@@ -1,0 +1,36 @@
+// Token-free RPC lifecycle fixture: complete each accepted prompt in the same
+// write as its preflight response, exercising transport/semantic ordering.
+import readline from "node:readline";
+
+const input = readline.createInterface({ input: process.stdin });
+let turns = 0;
+let output = "";
+const write = (record) => process.stdout.write(`${JSON.stringify(record)}\n`);
+input.on("line", (line) => {
+	const command = JSON.parse(line);
+	const response = { id: command.id, type: "response", command: command.type, success: true };
+	if (command.type === "prompt") {
+		if (command.message === "/handled") {
+			write({ ...response, data: { disposition: "handled" } });
+			return;
+		}
+		output = `answer ${++turns}`;
+		process.stdout.write(
+			[
+				{ ...response, data: { disposition: "started" } },
+				{ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: output }] } },
+				{ type: "agent_settled", aborted: false },
+			].map((record) => `${JSON.stringify(record)}\n`).join(""),
+		);
+		return;
+	}
+	const data = command.type === "get_state"
+		? { sessionFile: "/tmp/lifecycle-session.jsonl", sessionId: "lifecycle" }
+		: command.type === "get_last_assistant_text"
+			? { text: output }
+			: command.type === "get_session_stats"
+				? { tokens: { total: turns }, toolCalls: 0 }
+				: undefined;
+	write({ ...response, data });
+});
+input.on("close", () => process.exit(0));

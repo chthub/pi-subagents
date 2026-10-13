@@ -8,6 +8,7 @@
  * `·` is reserved for data separators (widget elapsed time, meta).
  */
 
+import { createHash } from "node:crypto";
 import { keyHint, type Theme, truncateToVisualLines } from "@earendil-works/pi-coding-agent";
 import {
 	Box,
@@ -79,14 +80,11 @@ const PREVIEW_LINES = 5;
 /** Head preview lines for write-like tools (read 10). */
 const PREVIEW_HEAD_LINES = 10;
 
-// Cache for the folded preview — body (50k web_fetch) + width → truncated lines.
-// Key is length + head/tail fingerprint (not reference), so a new details object
-// with identical content still hits. Bounded to avoid unbounded growth.
+// Renderer updates rebuild components, so share expensive wrapping by a
+// full-content digest, never by a length/head/tail fingerprint. Only the
+// small previews are retained, not another copy of each complete body.
 const PREVIEW_CACHE = new Map<string, ReturnType<typeof truncateToVisualLines>>();
 const PREVIEW_CACHE_MAX = 128;
-function previewKey(body: string, w: number): string {
-	return `${w}:${body.length}:${body.slice(0, 32)}\u0000${body.slice(-32)}`;
-}
 
 /** One content line with zero padding — pi's Text defaults to padding (1,1),
  * which adds stray blank rows around card content. All card surfaces must
@@ -134,36 +132,28 @@ function foldedBlockWith(
 		// collapsed preview (a raw row wider than the terminal gets clipped).
 		return { invalidate: () => {}, render: (w: number) => ["", ...new Text(body, 0, 0).render(w)] };
 	}
+	let digest: string | undefined;
+	let cache: { width: number; preview: ReturnType<typeof truncateToVisualLines> } | undefined;
 	return {
-		invalidate: () => {},
+		invalidate: () => {
+			cache = undefined;
+		},
 		render: (w: number) => {
-			const cacheKey = `${dir}:${previewKey(body, w)}`;
-			let preview = PREVIEW_CACHE.get(cacheKey);
-			if (!preview) {
-				if (dir === "tail") {
-					preview = truncateToVisualLines(body, lines, w, 0);
-				} else {
-					// head preview: keep first N visual lines, hint shows remaining
-					const all = body.split("\n");
-					const visual = truncateToVisualLines(body, 100000, w, 0);
-					const totalVisual = visual.visualLines.length;
-					if (totalVisual <= lines) {
-						preview = { visualLines: visual.visualLines, skippedCount: 0 } as ReturnType<typeof truncateToVisualLines>;
-					} else {
-						const headBody = all.slice(0, lines).join("\n");
-						const headPreview = truncateToVisualLines(headBody, lines, w, 0);
-						preview = {
-							visualLines: headPreview.visualLines,
-							skippedCount: totalVisual - headPreview.visualLines.length,
-						} as ReturnType<typeof truncateToVisualLines>;
+			if (cache?.width !== w) {
+				digest ??= createHash("sha256").update(body).digest("hex");
+				const key = `${dir}:${lines}:${w}:${digest}`;
+				let preview = PREVIEW_CACHE.get(key);
+				if (!preview) {
+					preview = truncateToVisualLines(body, lines, w, 0, dir === "head" ? "start" : "end");
+					if (PREVIEW_CACHE.size >= PREVIEW_CACHE_MAX) {
+						const first = PREVIEW_CACHE.keys().next().value;
+						if (first !== undefined) PREVIEW_CACHE.delete(first);
 					}
+					PREVIEW_CACHE.set(key, preview);
 				}
-				if (PREVIEW_CACHE.size >= PREVIEW_CACHE_MAX) {
-					const first = PREVIEW_CACHE.keys().next().value as string | undefined;
-					if (first !== undefined) PREVIEW_CACHE.delete(first);
-				}
-				PREVIEW_CACHE.set(cacheKey, preview);
+				cache = { width: w, preview };
 			}
+			const preview = cache.preview;
 			if (preview.skippedCount === 0) return ["", ...preview.visualLines];
 			const hint =
 				dir === "head"
@@ -194,8 +184,12 @@ function fieldsBlock(fields: CardField[], theme: Theme, expanded: boolean): Body
 		invalidate: () => {},
 		render: (w: number) => {
 			const keyWidth = Math.max(...fields.map((f) => visibleWidth(f.key))) + 2;
-			const valueWidth = Math.max(10, w - keyWidth);
-			const pad = " ".repeat(keyWidth);
+			// Stack keys above values when a hanging indent would consume the
+			// terminal. The minimum readable value width is a layout decision,
+			// never permission to emit a line wider than the host's budget.
+			const stacked = w < keyWidth + 10;
+			const valueWidth = Math.max(1, stacked ? w : w - keyWidth);
+			const pad = stacked ? "" : " ".repeat(keyWidth);
 			const out = [""];
 			for (const f of fields) {
 				const styled = theme.fg("toolOutput", f.value) + (f.note ? ` ${theme.fg("dim", f.note)}` : "");
@@ -206,8 +200,9 @@ function fieldsBlock(fields: CardField[], theme: Theme, expanded: boolean): Body
 					hidden = lines.length - f.fold;
 					lines = lines.slice(0, f.fold);
 				}
+				if (stacked) out.push(...new Text(theme.fg("muted", f.key), 0, 0).render(w));
 				lines.forEach((line, i) => {
-					const key = i === 0 ? theme.fg("muted", f.key + " ".repeat(keyWidth - visibleWidth(f.key))) : pad;
+					const key = !stacked && i === 0 ? theme.fg("muted", f.key + " ".repeat(keyWidth - visibleWidth(f.key))) : pad;
 					out.push(key + line);
 				});
 				if (hidden > 0) {
@@ -215,7 +210,7 @@ function fieldsBlock(fields: CardField[], theme: Theme, expanded: boolean): Body
 					out.push(pad + truncateToWidth(hint, valueWidth, "..."));
 				}
 			}
-			return out;
+			return out.map((line) => truncateToWidth(line, w, ""));
 		},
 	};
 }

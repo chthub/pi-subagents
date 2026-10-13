@@ -8,9 +8,9 @@
  * (most are a single token in practice).
  *
  * Uniqueness is per-process: the registry keeps a used-set and re-rolls on
- * collision. Cross-process collision is irrelevant — agents are addressed
- * only within their own tree, and the pool (~200) makes random collisions
- * between independent trees harmless.
+ * collision. Exhausted names gain a numeric suffix instead of being reused.
+ * Tree telemetry scopes these local names by their parent edges; callers
+ * still address only their own direct children's short names.
  */
 
 /** Short first-name / nickname pool (no hard length rule, naturally terse). */
@@ -201,5 +201,10 @@ export function randomAgentName(used: ReadonlySet<string>): string {
 	// Bounded re-rolls: a saturated pool degrades to the first free name
 	// instead of looping forever.
 	for (let i = 0; i < NAMES.length && used.has(name); i++) name = pick();
-	return used.has(name) ? (NAMES.find((n) => !used.has(n)) ?? name) : name;
+	if (!used.has(name)) return name;
+	const free = NAMES.find((n) => !used.has(n));
+	if (free) return free;
+	let suffix = 2;
+	while (used.has(`${name}-${suffix}`)) suffix++;
+	return `${name}-${suffix}`;
 }

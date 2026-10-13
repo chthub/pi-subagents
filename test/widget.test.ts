@@ -113,6 +113,26 @@ describe("AgentWidget — the bottom agent list", () => {
 		w.dispose();
 	});
 
+	it("shows a nested local name while clicks retain the scoped identity", () => {
+		const { ui, lines, click } = capture();
+		const roster = new Roster();
+		roster.upsert({
+			agentId: "max/sam",
+			label: "nested task",
+			indent: 1,
+			sessionPath: "/s/nested.jsonl",
+		});
+		let opened: string | undefined;
+		const w = new AgentWidget(ui, roster, (id) => {
+			opened = id;
+		});
+		assert.match(lines()[0], /@sam\s+nested task/);
+		assert.doesNotMatch(lines()[0], /@max\/sam/);
+		click(0);
+		assert.equal(opened, "max/sam");
+		w.dispose();
+	});
+
 	it("keeps a finished agent's row with its status instead of removing it", () => {
 		const { ui, lines } = capture();
 		const roster = new Roster();

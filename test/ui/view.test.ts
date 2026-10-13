@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 import { initTheme } from "@earendil-works/pi-coding-agent";
 import { dataCard } from "../../ui/card.js";
 import { ticker } from "../../ui/ticker.js";
-import { createToolView } from "../../ui/view.js";
+import { createToolView, disposeToolViewAnimation } from "../../ui/view.js";
 
 initTheme("light");
 
@@ -203,6 +203,34 @@ describe("createToolView — clock-driven animation while processing", () => {
 		assert.equal(ticker.subscriberCount, 1, "idempotent across re-renders");
 		terminal(st);
 		assert.equal(ticker.subscriberCount, 0, "terminal render unsubscribes");
+	});
+
+	it("detached card cleanup is idempotent and does not change execution status", () => {
+		const st = {};
+		const c = ctx({ isPartial: true, state: st });
+		const before = ticker.subscriberCount;
+		view.renderCall({ query: "q1" }, theme, c);
+		assert.equal(ticker.subscriberCount, before + 1);
+		disposeToolViewAnimation(st);
+		disposeToolViewAnimation(st);
+		assert.equal(ticker.subscriberCount, before);
+		// Cleanup is not a terminal result: the state is still usable by a
+		// live card if the host deliberately resumes rendering it.
+		view.renderCall({ query: "q1" }, theme, c);
+		assert.equal(ticker.subscriberCount, before + 1);
+		terminal(st);
+	});
+
+	it("detached cleanup ignores animation fields owned by other extensions", () => {
+		let stopped = false;
+		disposeToolViewAnimation({
+			animation: {
+				unsubscribe: () => {
+					stopped = true;
+				},
+			},
+		});
+		assert.equal(stopped, false);
 	});
 
 	it("streaming result renders do not subscribe (bare body has no animation)", async () => {

@@ -40,6 +40,35 @@ describe("resolveModel", () => {
 		assert.equal(r.error, undefined);
 	});
 
+	it("prefers an exact model id over a prefix variant in any registry order", () => {
+		const models = stubRegistry([
+			{ provider: "openai", id: "gpt-5-mini" },
+			{ provider: "openai", id: "gpt-5" },
+		]);
+		for (const spec of ["gpt-5", "openai/gpt-5", "OPENAI/GPT-5"])
+			assert.equal(resolveModel(models, fallback, spec).model, "openai/gpt-5");
+	});
+
+	it("prefers an exact provider over a provider with the same prefix", () => {
+		const models = stubRegistry([
+			{ provider: "openai-codex", id: "gpt-5.3-codex" },
+			{ provider: "openai", id: "gpt-5.3-codex" },
+		]);
+		assert.equal(resolveModel(models, fallback, "openai/gpt-5.3-codex").model, "openai/gpt-5.3-codex");
+	});
+
+	it("prefers literal ids before punctuation-normalized aliases", () => {
+		const models = stubRegistry([
+			{ provider: "test", id: "model-1" },
+			{ provider: "test", id: "model.1" },
+		]);
+		assert.equal(resolveModel(models, fallback, "test/model.1").model, "test/model.1");
+	});
+
+	it("does not treat a provider name as a model id", () => {
+		assert.ok(resolveModel(registry, fallback, "anthropic").error);
+	});
+
 	it("resolves model name without provider", () => {
 		const r = resolveModel(registry, fallback, "gemini-2.0-flash");
 		assert.equal(r.model, "google/gemini-2.0-flash");

@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { initTheme, SessionManager } from "@earendil-works/pi-coding-agent";
+import { initTheme, SessionManager, type ToolRenderers } from "@earendil-works/pi-coding-agent";
 import { stripTerminalSequences, type TuiMouseEvent, visibleWidth } from "@earendil-works/pi-tui";
 import { AgentView, type AgentViewDeps } from "../agent-view.js";
+import { AssistantStream } from "../assistant-stream.js";
 import type { RpcEvent } from "../protocol.js";
+import { ticker } from "../ui/ticker.js";
+import { spawnView } from "../views.js";
 
 initTheme("dark");
 
@@ -65,7 +68,7 @@ function rail(view: AgentView, width = 120) {
 
 function setup(
 	loadMessages: () => Promise<unknown[]> = async () => [],
-	extra: Partial<Pick<AgentViewDeps, "canStop" | "stop" | "footer">> = {},
+	extra: Partial<Pick<AgentViewDeps, "canStop" | "stop" | "footer" | "streamingSnapshot" | "renderers" | "entry">> = {},
 	tuiExtra: Record<string, unknown> = {},
 ) {
 	let listener: ((event: RpcEvent) => void) | undefined;
@@ -87,9 +90,9 @@ function setup(
 			},
 			loadMessages,
 			send: async () => undefined,
-			...extra,
 			onRosterChange: () => () => {},
 			renderers: () => undefined,
+			...extra,
 		},
 		() => {},
 	);
@@ -513,4 +516,112 @@ test("pi's footer lines for the agent sit above the view's key line", async (t) 
 	assert.match(lines.at(-3) ?? "", /claude-sonnet-5-5 • high/);
 	assert.match(lines.at(-2) ?? "", /^web: on/);
 	assert.match(lines.at(-1) ?? "", /^\S.*Enter Send .*Esc Back/, "the key line starts in the footer's column");
+});
+
+test("opening mid-stream hydrates prior text and consumes real delta-only wire updates", async (t) => {
+	const live = new AssistantStream(message());
+	live.apply({ type: "thinking_delta", contentIndex: 0, delta: "before thought" });
+	live.apply({ type: "text_delta", contentIndex: 2, delta: "before open" });
+	const { view, emit, text } = setup(async () => [], { streamingSnapshot: () => live.snapshot() });
+	t.after(() => view.dispose());
+	await Promise.resolve();
+	assert.match(text(), /before open/);
+	// Pi's wire strips both message and partial; only the update delta remains.
+	emit({
+		type: "message_update",
+		assistantMessageEvent: { type: "text_delta", contentIndex: 2, delta: " after open" },
+	});
+	assert.match(text(), /before open after open/);
+	assert.equal(text().match(/before open/g)?.length, 1, "sparse index hydration must not duplicate the block");
+	assert.match(text(), /before thought/);
+	assert.deepEqual(live.message.content[1], { type: "text", text: "before open" }, "view deltas are detached");
+});
+
+function pendingSpawn() {
+	return message(
+		[{ type: "toolCall", id: "pending", name: "agent_spawn", arguments: { label: "child", prompt: "work" } }],
+		"toolUse",
+	);
+}
+const pendingViewDeps = {
+	entry: () => ({ agentId: "test", label: "parent", status: "running" as const, startedAt: 0, indent: 0 }),
+	renderers: (name: string) => (name === "agent_spawn" ? (spawnView as ToolRenderers) : undefined),
+};
+
+test("transcript reload and repeated view disposal release renderer clocks without stopping tools", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	const before = ticker.subscriberCount;
+	let renders = 0;
+	const { view, emit } = setup(async () => [pendingSpawn()], pendingViewDeps, {
+		requestRender: () => renders++,
+	});
+	t.after(() => view.dispose());
+	await Promise.resolve();
+	view.render(120);
+	assert.equal(ticker.subscriberCount, before + 2, "view clock and pending tool clock");
+	for (let i = 0; i < 3; i++) {
+		emit({ type: "tool_execution_end" });
+		t.mock.timers.tick(60);
+		await Promise.resolve();
+		await Promise.resolve();
+		assert.equal(ticker.subscriberCount, before + 2, "replaced replay clocks do not accumulate");
+	}
+	view.dispose();
+	const atDispose = renders;
+	view.dispose();
+	assert.equal(ticker.subscriberCount, before, "all UI clocks released");
+	assert.equal(renders, atDispose, "dispose is idempotent");
+});
+
+test("closing during a pending initial replay prevents late renderer subscriptions and redraws", async () => {
+	const before = ticker.subscriberCount;
+	let resolve!: (messages: unknown[]) => void;
+	let renders = 0;
+	const { view } = setup(
+		() =>
+			new Promise((done) => {
+				resolve = done;
+			}),
+		pendingViewDeps,
+		{
+			requestRender: () => renders++,
+		},
+	);
+	view.dispose();
+	const atDispose = renders;
+	resolve([pendingSpawn()]);
+	await Promise.resolve();
+	await Promise.resolve();
+	assert.equal(ticker.subscriberCount, before);
+	assert.equal(renders, atDispose, "late async reload does not render a disposed view");
+});
+
+test("closing during an event-triggered replay releases the old transcript and rejects the late one", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	const before = ticker.subscriberCount;
+	let calls = 0;
+	let resolve!: (messages: unknown[]) => void;
+	let renders = 0;
+	const { view, emit } = setup(
+		() =>
+			++calls === 1
+				? Promise.resolve([pendingSpawn()])
+				: new Promise((done) => {
+						resolve = done;
+					}),
+		pendingViewDeps,
+		{ requestRender: () => renders++ },
+	);
+	await Promise.resolve();
+	assert.equal(ticker.subscriberCount, before + 2);
+	emit({ type: "tool_execution_end" });
+	t.mock.timers.tick(60);
+	view.dispose();
+	const atDispose = renders;
+	resolve([pendingSpawn()]);
+	await Promise.resolve();
+	await Promise.resolve();
+	await Promise.resolve();
+	assert.equal(ticker.subscriberCount, before);
+	assert.equal(renders, atDispose);
 });

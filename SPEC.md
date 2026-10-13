@@ -210,16 +210,19 @@ queued → running ──→ completed (notify)
        persistent: completed → idle (resident, zero model tokens) → stopped
 ```
 
-- Readiness is established by the prompt preflight response.
+- Readiness is established by a prompt preflight that starts or queues a model run. A successful response with `disposition: "handled"` is not a running turn; an initial handled prompt returns a tool error instead of waiting for a settlement that will not happen.
+- Settlement snapshots freeze each turn's identity, ownership, status, output, and timing before asynchronous reporting. An older completion may be delivered after another turn starts, but it cannot idle or stop that newer turn.
 - Root children are persistent by default; children spawned inside a sub-agent are not. Callers may override this. Residency lasts only for the host session. Background spawning is root-only.
 - Idle means a resident RPC process without an active model turn. Notifications and widget rows identify it as idle; it remains addressable until stopped or host exit.
-- Stop closes stdin for orderly shutdown and marks `stoppedByControl` to suppress a new completion notification.
+- Stop closes stdin for orderly shutdown and marks the running turn `stoppedByControl` to suppress a new completion notification. Running and idle processes both wait for exit, with process-group SIGTERM and then SIGKILL fallbacks for shutdown that does not finish.
+- An idle resident's unexpected process exit releases its registry entry without generating another task result; its saved session remains available for revival.
 - Failures and limit stops produce error tool results, consistent with bash exit/cancellation reporting.
 - Reload and session replacement (`/new`, `/resume`, `/fork`) dispatch `session_shutdown` to the old extension runtime before replacing it. The registry closes this runtime's children for every reason: the old session's inbox is closed, so a surviving child could never deliver again. Host crashes also close their stdin. Cleanup is process-local, so multiple Pi instances do not share lifecycle state.
 
 ### Message model
 
-- IDs are short generated names (`max`, `zoe`, `kai`), not tree paths. A parent owns the references returned by its spawns.
+- Model-facing IDs are short generated names (`max`, `zoe`, `kai`), not tree paths. A parent owns the references returned by its spawns. Exhausting the short-name pool adds a numeric suffix rather than reusing an existing ID.
+- Internal subtree-display keys are scoped at every parent-child connection (for example `max/sam`), so equal local names from different parents remain distinct. These keys are not routing references; nested rows still display their local short names.
 - Model-facing references, card titles, and widget rows use `@max`. Input accepts the optional leading `@`; routing strips it once. Sender prefixes such as `[from max]` retain the bare ID.
 - `agent_send` addresses only an exact direct-child ID or `@parent`. Unknown targets fail explicitly. There is no automatic forwarding or route discovery.
 - When nested communication is enabled, cross-level forwarding is decided by each intermediate parent. The mechanism makes no routing decisions for the model.
@@ -261,7 +264,7 @@ automatic result: batched turn_end / agent_before_settle entries;
 - Ready results first enter a session-scoped inbox. A busy parent receives the whole ready batch after its current response and tool batch, before the next model call: the steering delivery point. `turn_end` appends custom entries and requests at most one continuation; `agent_before_settle` handles the final boundary. Do not interrupt tools or generation, wait for unfinished children, use the follow-up queue, or depend on the global steering consumption mode.
 - Idle delivery uses one `setImmediate` to collect ready callbacks. Append the earlier cards without triggering a turn, then let the final card start one run with `deliverAs: "steer", triggerTurn: true`. Card count is not model-call count.
 - Model content contains `{kind: "final_reply", completion_id, status, agent_id, result, session_path}` and, for persistent completion, `idle: true`. `kind` tells the parent this is the turn's final reply (a final report or a blocking question), as opposed to a mid-turn `{kind: "non_blocking_question", agent_id, question}` from `agent_send` to `@parent`. A foreground spawn's final reply is the `agent_spawn` tool result itself.
-- A completion ID combines a process-instance UUID and settlement sequence. Deduplicate the event, not its text or agent ID. Preserve different turns, including acknowledgements. A deliberate stop neither emits a new completion nor retracts queued results.
+- A completion ID combines a process-instance UUID and accepted-turn sequence. Deduplicate the event, not its text or agent ID. Preserve different turns, including acknowledgements. A deliberate stop neither emits a new completion nor retracts earlier completed results, including snapshots still reading display metadata. Suppression is frozen for the stopped turn, not shared with older turns.
 - On abort/error, save results without requesting continuation. Later idle results remain silent until another accepted run. Shutdown/session replacement cancels callbacks; senders from the old session cannot write to the new one.
 - Parameter definitions explain parameters. Tool descriptions/snippets explain calls. Coordination rules have one source in [`skills/pi-subagents-workflow/SKILL.md`](skills/pi-subagents-workflow/SKILL.md), not duplicated tool guidelines. `package.json` declares and ships the skill; whole-package discovery advertises its name, description, and path before tool activation, while the body is read on demand. A process that cannot spawn removes the skill from its system prompt in `before_agent_start`. Model-facing guidance uses English.
 - The child prompt suffix explains both channels up. The final reply carries the final report and blocking questions: ask and end the reply when blocked on missing information, return the result directly when finished, and do not send a duplicate completion report. `agent_send` to `@parent` carries only non-blocking questions: send and keep working; never blocking questions, progress updates, or results. A foreground spawn adds that the parent reads mid-turn messages only after the reply ends, since it is blocked in its tool call until then, so non-blocking questions go in the reply too. Every child has `agent_send`: the extension adds it to any `tools` allowlist, on spawn and on revive. The skill adds no preset roles, enforced workflow, or default budgets.
@@ -294,13 +297,13 @@ A subtree has one display destination, determined by its anchor:
 - **Foreground**: the subtree fits inside one parent tool call, so descendant counters fold into that tool card (`done n/total · n running · …`) rather than the widget. Nested activity still appears in the card body. Counters cover descendants, not the direct child whose own output occupies the card.
 - **Background**: the child's lifetime extends beyond the tool call, so it and its descendants appear in widget rows with depth indentation.
 
-All nodes report all spawns, foreground and background. Intermediate nodes forward the event unchanged except for incrementing depth. The root chooses card folding or widget display. Omitting foreground telemetry previously hid foreground descendants of background children and left escaped background descendants with invalid indentation.
+All nodes report all spawns, foreground and background. At each incoming child connection, intermediate nodes scope the event ID and parent link by that edge and increment depth when forwarding. The root chooses card folding or widget display. Omitting foreground telemetry previously hid foreground descendants of background children and left escaped background descendants with invalid indentation.
 
 Children can only spawn foreground work, so no detached edge appears inside their subtrees. Root background edges and their descendants remain represented in the widget.
 
 A persistent foreground child may outlive its completed tool card. Once execution settles, `cardClosed` prevents new descendant events from folding into the frozen card; later activity goes to the widget.
 
-**Removing a parent ends its live display subtree.** Process exit ends descendant telemetry, so an add event carries its direct `parent` ID throughout forwarding. `AgentWidget` recursively marks remaining live descendants stopped when their parent is removed, retaining roster entries for review. Previously those descendants could remain as permanent spinners after their processes had exited.
+**Removing a parent ends its live display subtree.** Process exit ends descendant telemetry, so an add event carries its direct `parent` display key, scoped together with its own key throughout forwarding. `AgentWidget` recursively marks remaining live descendants stopped when their parent is removed, retaining roster entries for review. Previously those descendants could remain as permanent spinners after their processes had exited.
 
 **Shared vocabulary:** `counterParts` supplies foreground subtree counters; `agentTitle` supplies `@id — label`; shared card helpers supply status icons. Consumers choose status tones without duplicating the vocabulary.
 

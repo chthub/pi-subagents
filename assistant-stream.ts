@@ -5,17 +5,31 @@ import type { JsonAgentSessionEvent } from "@earendil-works/pi-coding-agent";
 type WireUpdate = Extract<JsonAgentSessionEvent, { type: "message_update" }>["assistantMessageEvent"];
 type ContentBlock = AssistantMessage["content"][number];
 
+/** Detached UI snapshot, retaining the wire indices hidden by dense rendering. */
+export interface AssistantStreamSnapshot {
+	message: AssistantMessage;
+	contentIndices: number[];
+}
+
 export class AssistantStream {
 	readonly message: AssistantMessage;
 	/** Wire indices are stable even when earlier blocks have no visible content. */
 	private readonly blocks = new Map<number, ContentBlock>();
 
-	constructor(message: AssistantMessage) {
+	constructor(message: AssistantMessage, contentIndices?: readonly number[]) {
 		this.message = structuredClone(message);
 		this.message.content.forEach((block, index) => {
-			if (block) this.blocks.set(index, block);
+			if (block) this.blocks.set(contentIndices?.[index] ?? index, block);
 		});
 		this.syncContent();
+	}
+
+	/** Consumers may mutate this snapshot without changing the live fold. */
+	snapshot(): AssistantStreamSnapshot {
+		return {
+			message: structuredClone(this.message),
+			contentIndices: [...this.blocks.keys()].sort((a, b) => a - b),
+		};
 	}
 
 	/** True when the renderer should update. Tool argument fragments are not displayed here. */

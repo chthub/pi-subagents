@@ -46,7 +46,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { type AgentFooterData, finishedContextUsage, gitBranch } from "./agent-footer.js";
-import { type AgentCompletion, AgentProcess, type WakeOutcome } from "./agent-process.js";
+import { type AgentCompletion, AgentProcess } from "./agent-process.js";
 import { AgentView } from "./agent-view.js";
 import { registerCompletionInbox } from "./completion-inbox.js";
 import { canSpawnAt, envInt, loadConfig } from "./config.js";
@@ -61,7 +61,7 @@ import { Roster } from "./roster.js";
 import { persistRoster, rosterFromBranch } from "./roster-state.js";
 import { runSpawnSession, type SpawnOutcome } from "./spawn-session.js";
 import { fallbackRenderers } from "./transcript.js";
-import { createSubtreeDisplay } from "./tree-display.js";
+import { createSubtreeDisplay, displayAgentId } from "./tree-display.js";
 import type { SubagentDetails } from "./types.js";
 import { atId, sendView, spawnView, stopView } from "./views.js";
 import { AgentWidget } from "./widget.js";
@@ -536,6 +536,9 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	const inbox = registerCompletionInbox(pi);
+	// Concurrent messages share one preflight, then each is delivered normally.
+	const revivals = new Map<string, Promise<string | undefined>>();
+	let sessionGeneration = 0;
 	const completionSinks = new WeakMap<RegisteredAgent, (completion: AgentCompletion) => void>();
 	const bindCompletion = (agent: RegisteredAgent): void => {
 		const deliver = inbox.capture();
@@ -565,30 +568,31 @@ export default function (pi: ExtensionAPI) {
 	// of deeper events. Lives at extension scope: the tracked-set must span
 	// executes (a background child reports activity long after its execute returned).
 	const tree = createTreeTelemetry(HAS_PARENT);
+	const releaseExited = (agent: AgentProcess): void => {
+		if (processes.get(agent.agentId) !== agent) return;
+		processes.delete(agent.agentId);
+		if (registry.lookup(agent.agentId) !== agent) return; // foreground/normal teardown owns its result
+		const result = agent.status === "completed" ? "done" : agent.status === "failed" ? "failed" : "stopped";
+		tree.remove(agent.agentId, result);
+		registry.removeExited(agent, result);
+		roster.setStatus(agent.agentId, result);
+	};
 
-	/** A wake turn ended: deliver its answer to this session, like a completion. */
-	const reportWake = async (agent: AgentProcess, status: WakeOutcome): Promise<void> => {
-		const completionId = agent.completionId;
-		const durationMs = Date.now() - agent.turnStartedAt;
-		const [output, stats] = await Promise.all([agent.lastOutput(), agent.getStats()]);
-		notifyCompletion(agent, {
-			completionId,
-			status,
-			output:
-				status === "failed"
-					? output || agent.errorText || "Follow-up turn failed."
-					: status === "stopped"
-						? `${output || "Sub-agent was stopped."}\n${TIME_LIMIT_NOTE}`
-						: output,
-			stats: {
-				tokens: stats?.tokens ?? 0,
-				toolUses: stats?.toolUses ?? 0,
-				// This turn's time, not the agent's lifetime.
-				durationMs,
-			},
-			sessionPath: agent.sessionPath,
-			sessionId: agent.sessionId,
-		});
+	/** Read the frozen settlement, never a later turn's mutable RPC state. */
+	const reportWake = async (agent: AgentProcess): Promise<AgentCompletion> => {
+		const completion = await agent.completionSnapshot();
+		if (completion.owedToParent && !completion.stoppedByControl) {
+			notifyCompletion(agent, {
+				...completion,
+				output:
+					completion.status === "failed"
+						? completion.output || "Follow-up turn failed."
+						: completion.status === "stopped"
+							? `${completion.output || "Sub-agent was stopped."}\n${TIME_LIMIT_NOTE}`
+							: completion.output,
+			});
+		}
+		return completion;
 	};
 
 	// ── subagent_enable ─────────────────────────────────
@@ -702,6 +706,8 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			const startedAt = Date.now();
+			// A child's local name is also the namespace for its display subtree.
+			const agentId = registry.nextAgentId();
 
 			// Foreground: stream the sub-agent's session as an ordered activity
 			// stream. AgentProcess accumulates RenderEvents internally at the
@@ -712,6 +718,7 @@ export default function (pi: ExtensionAPI) {
 			// fold into THIS card while it's open, forward to my parent, or
 			// surface on the root widget. One module owns the whole decision.
 			const subtree = createSubtreeDisplay({
+				childId: agentId,
 				hasParent: HAS_PARENT,
 				foregroundEdge: !runInBackground,
 				getWidget: () => {
@@ -738,9 +745,6 @@ export default function (pi: ExtensionAPI) {
 				events: agent.getEvents(),
 				nested: subtree.nested(),
 			});
-			// Short human-name id (max, zoe…) — the LLM-facing reference. No tree
-			// structure: agents address only ids they were given, hop by hop.
-			const agentId = registry.nextAgentId();
 			const live = createLiveChannels({
 				// getWidget, not widget: the widget is created on first use, so a
 				// captured reference would be null for every update before that.
@@ -791,15 +795,18 @@ export default function (pi: ExtensionAPI) {
 				// A wake only the user started from the agent view is a side chat:
 				// its answer stays in the agent's own session, never reported up.
 				onIdle: (outcome) => {
-					const reportUp = agent.parentIsWaiting && !agent.stoppedByControl;
+					const settled = reportWake(agent);
 					if (outcome === "completed") {
-						if (reportUp) void reportWake(agent, "completed").catch(() => {}); // best-effort: must not crash the host
+						void settled.catch(() => {}); // best-effort: must not crash the host
 						registry.markIdle(agentId);
 						return;
 					}
-					void (reportUp ? reportWake(agent, outcome) : Promise.resolve())
-						.then(() => tree.remove(agentId, outcome))
-						.then(() => registry.stopAndRemove(agentId, outcome))
+					void settled
+						.then(async (completion) => {
+							if (!agent.isCurrentCompletion(completion) || registry.lookup(agentId) !== agent) return;
+							tree.remove(agentId, outcome);
+							await registry.stopAndRemove(agentId, outcome);
+						})
 						.catch(() => {}); // best-effort: a cleanup failure must not crash the host
 				},
 				// Where live output goes lives in live-output.ts: the widget row and
@@ -808,9 +815,7 @@ export default function (pi: ExtensionAPI) {
 				// spawn while its tool call runs.
 				onDelta: (delta) => live.onDelta(agent, delta),
 				onActivityChange: (activity) => live.onActivity(agent, activity),
-				onExit: () => {
-					if (processes.get(agentId) === agent) processes.delete(agentId);
-				},
+				onExit: () => releaseExited(agent),
 			});
 			bindCompletion(agent);
 			processes.set(agentId, agent);
@@ -892,8 +897,9 @@ export default function (pi: ExtensionAPI) {
 							// marker, stays addressable). Registering an already-completed
 							// agent at its terminal status would be removed by the
 							// widget's terminal cleanup before markIdle could flip it.
-							registry.register(a as AgentProcess, "idle");
-							tree.add(a, "idle");
+							const status = (a as AgentProcess).status === "running" ? "running" : "idle";
+							registry.register(a as AgentProcess, status);
+							tree.add(a, status);
 						},
 						// Foreground settled: report the child upward (widget-rooted
 						// nodes only — at the root the card itself is the display; a
@@ -962,7 +968,9 @@ export default function (pi: ExtensionAPI) {
 					roster.setStatus(
 						agentId,
 						outcome.resident
-							? "idle"
+							? agent.status === "running"
+								? "running"
+								: "idle"
 							: outcome.status === "completed"
 								? "done"
 								: outcome.status === "failed"
@@ -1158,7 +1166,7 @@ export default function (pi: ExtensionAPI) {
 			});
 			// A finished child is revived from its session with the message as
 			// its next turn; the answer comes back as a notification.
-			if (target !== "@parent" && isRevivable(target)) {
+			if (target !== "@parent" && (revivals.has(target) || isRevivable(target))) {
 				const label = roster.get(target)?.label;
 				const error = await revive(target, `${formatFrom(MY_AGENT_ID)}${message}`, ctx.cwd, "parent");
 				if (error) {
@@ -1279,7 +1287,7 @@ export default function (pi: ExtensionAPI) {
 	 * started (agent_send) reports its answer here like a completion; a turn
 	 * the user started in the agent view is a side chat and reports nothing.
 	 */
-	const revive = async (
+	const startRevival = async (
 		agentId: string,
 		text: string,
 		cwd: string,
@@ -1287,7 +1295,9 @@ export default function (pi: ExtensionAPI) {
 	): Promise<string | undefined> => {
 		const entry = roster.get(agentId);
 		if (!entry?.sessionPath) return "This agent has no session file to resume.";
+		const owner = sessionGeneration;
 		const subtree = createSubtreeDisplay({
+			childId: agentId,
 			hasParent: HAS_PARENT,
 			foregroundEdge: false,
 			getWidget: () => widget ?? undefined,
@@ -1307,42 +1317,73 @@ export default function (pi: ExtensionAPI) {
 			onMessage: onChildMessage,
 			onTreeEvent: (event) => subtree.onTreeEvent(event),
 			onIdle: (outcome) => {
-				const reportUp = agent.parentIsWaiting && !agent.stoppedByControl;
+				const settled = reportWake(agent);
 				if (outcome === "completed") {
-					if (reportUp) void reportWake(agent, "completed").catch(() => {});
+					void settled.catch(() => {});
 					registry.markIdle(agentId);
 					return;
 				}
-				void (reportUp ? reportWake(agent, outcome) : Promise.resolve())
-					.then(() => registry.stopAndRemove(agentId, outcome))
+				void settled
+					.then(async (completion) => {
+						if (!agent.isCurrentCompletion(completion) || registry.lookup(agentId) !== agent) return;
+						await registry.stopAndRemove(agentId, outcome);
+					})
 					.catch(() => {});
 			},
 			onDelta: (delta) => live.onDelta(agent, delta),
 			onActivityChange: (activity) => live.onActivity(agent, activity),
-			onExit: () => {
-				if (processes.get(agentId) === agent) processes.delete(agentId);
-			},
+			onExit: () => releaseExited(agent),
 		});
 		bindCompletion(agent);
 		processes.set(agentId, agent);
 		const started = await agent.spawnAndSend(text, origin);
-		if (!started.ok) {
-			processes.delete(agentId);
+		if (!started.ok || owner !== sessionGeneration || agent.stoppedByControl || !agent.isAlive) {
+			if (processes.get(agentId) === agent) processes.delete(agentId);
 			await agent.stop().catch(() => {});
-			return started.error;
+			return !started.ok ? started.error : "Agent was stopped while resuming.";
 		}
 		registry.register(agent, "running");
-		roster.upsert({ agentId, status: "running", endedAt: undefined });
+		roster.upsert({ agentId, startedAt: agent.startedAt });
+		roster.setStatus(agentId, "running");
 		void agent
 			.waitForCompletion()
 			.then(async (completion) => {
 				// The parent waited on it: the completion policy notifies and keeps it resident.
 				if (completion.owedToParent) await registry.complete(agent, completion);
-				else if (completion.status === "completed") registry.markIdle(agentId);
-				else await registry.stopAndRemove(agentId, completion.status === "failed" ? "failed" : "stopped");
+				else if (agent.isCurrentCompletion(completion) && registry.lookup(agentId) === agent) {
+					if (completion.status === "completed") registry.markIdle(agentId);
+					else await registry.stopAndRemove(agentId, completion.status === "failed" ? "failed" : "stopped");
+				}
 			})
 			.catch(() => {});
 		return undefined;
+	};
+
+	const revive = (
+		agentId: string,
+		text: string,
+		cwd: string,
+		origin: "parent" | "user",
+	): Promise<string | undefined> => {
+		const owner = sessionGeneration;
+		const pending = revivals.get(agentId);
+		if (pending) {
+			return pending.then(async (error) => {
+				if (error) return error;
+				if (owner !== sessionGeneration) return "Session ended while resuming the agent.";
+				const agent = processes.get(agentId);
+				if (!agent?.isAlive) return "Agent stopped before the message could be delivered.";
+				const ok = await agent.sendMessage(text, origin);
+				if (ok) roster.setStatus(agentId, agent.status === "running" ? "running" : "idle");
+				return ok ? undefined : "Delivery failed.";
+			});
+		}
+		const starting = startRevival(agentId, text, cwd, origin);
+		const shared = starting.finally(() => {
+			if (revivals.get(agentId) === shared) revivals.delete(agentId);
+		});
+		revivals.set(agentId, shared);
+		return shared;
 	};
 
 	/** A direct child whose process is gone but whose session can be resumed. */
@@ -1354,11 +1395,11 @@ export default function (pi: ExtensionAPI) {
 	/** Deliver a message typed in the agent view. */
 	const sendFromView = async (agentId: string, text: string, cwd: string): Promise<string | undefined> => {
 		const live = processes.get(agentId);
-		if (!live?.isAlive) return revive(agentId, text, cwd, "user");
+		if (revivals.has(agentId) || !live?.isAlive) return revive(agentId, text, cwd, "user");
 		const wasIdle = roster.get(agentId)?.status === "idle";
 		const ok = await live.sendMessage(text, "user");
 		if (!ok) return "Delivery failed.";
-		if (wasIdle) roster.setStatus(agentId, "running");
+		if (wasIdle) roster.setStatus(agentId, live.status === "running" ? "running" : "idle");
 		return undefined;
 	};
 
@@ -1417,6 +1458,7 @@ export default function (pi: ExtensionAPI) {
 							subscribe: (listener) => processes.get(agentId)?.subscribe(listener),
 							processKey: () => processes.get(agentId),
 							loadMessages: () => loadMessages(agentId),
+							streamingSnapshot: () => processes.get(agentId)?.getStreamingSnapshot(),
 							send: (text) => sendFromView(agentId, text, cwd),
 							canStop: () => processes.get(agentId)?.isAlive === true,
 							footer: () => loadFooter(agentId, branch),
@@ -1453,7 +1495,12 @@ export default function (pi: ExtensionAPI) {
 				openAgent(wanted);
 				return;
 			}
-			const options = entries.map((e) => `${"  ".repeat(e.indent)}${atId(e.agentId)} \u2014 ${e.label}  (${e.status})`);
+			const options = entries.map((e, index) => {
+				const ancestors = e.agentId.split("/").slice(0, -1);
+				const parent = ancestors.length ? ` \u00b7 via ${ancestors.map(atId).join(" \u2192 ")}` : "";
+				// select returns a string, so every item must have a unique label.
+				return `${index + 1}. ${"  ".repeat(e.indent)}${atId(displayAgentId(e.agentId))} \u2014 ${e.label}  (${e.status}${parent})`;
+			});
 			const picked = await ctx.ui.select("Sub-agents", options);
 			if (picked === undefined) return;
 			const entry = entries[options.indexOf(picked)];
@@ -1520,6 +1567,7 @@ export default function (pi: ExtensionAPI) {
 		);
 	};
 	pi.on("session_start", (_event, ctx) => {
+		sessionGeneration++;
 		modelRegistry = ctx.modelRegistry;
 		restoreAgentTools(ctx);
 		rebuildRoster(ctx);
@@ -1532,6 +1580,8 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", async () => {
+		sessionGeneration++;
+		revivals.clear();
 		unsubscribePersistence?.();
 		unsubscribePersistence = undefined;
 		// Every reason ends this runtime's ownership of its children. Quit: the
@@ -1547,8 +1597,7 @@ export default function (pi: ExtensionAPI) {
 		// EOF → rpc shutdown) even if the parent dies first, because the pipe
 		// closes — no tmux, no disk cleanup, no signals.
 		const live = [...processes.values()];
-		await registry.shutdown();
-		for (const agent of live) void agent.stop().catch(() => {});
+		await Promise.all([registry.shutdown(), ...live.map((agent) => agent.stop().catch(() => {}))]);
 		processes.clear();
 		widget?.dispose();
 		widget = null;
