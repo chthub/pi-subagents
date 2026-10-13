@@ -235,15 +235,7 @@ pi 退出时，子 agent（运行中或 idle）都收到优雅的 stdin-EOF 关�
 
 ## 开发
 
-运行时模块位于包根目录；`ui/` 放内部渲染组件，`skills/` 放按需读取的协调指导，`test/` 按这些边界组织测试。[SPEC.md](SPEC.md) 是设计约定，[docs/ui.md](docs/ui.md) 描述 UI 层。`preview.ts` 和 `ui/preview-runtime.ts` 仅供开发预览，不进入打包产物。
-
-```bash
-npm install
-npm test
-npm run typecheck
-npm run check
-npm run preview
-```
+开发、版本更新与发布规范统一见 [AGENTS.md](AGENTS.md)。
 
 ## 许可证
 

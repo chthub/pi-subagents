@@ -235,15 +235,7 @@ When pi exits, sub‑agents (running or idle) get a graceful stdin‑EOF shutdow
 
 ## Development
 
-Runtime modules live at the package root; `ui/` contains internal rendering primitives, `skills/` contains on-demand coordination guidance, and `test/` mirrors those boundaries. [SPEC.md](SPEC.md) is the design contract; [docs/ui.md](docs/ui.md) describes the UI layer. `preview.ts` and `ui/preview-runtime.ts` are development-only and excluded from the package tarball.
-
-```bash
-npm install
-npm test
-npm run typecheck
-npm run check
-npm run preview
-```
+See [AGENTS.md](AGENTS.md) for development, versioning, and publishing guidelines.
 
 ## License
 
