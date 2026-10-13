@@ -17,7 +17,7 @@ The primitives have two families: **views**, where a tool declares a data-to-car
 
 | Module | Responsibility | Exports |
 |---|---|---|
-| `width.ts` | Width-safety helpers for the card primitives: `capPlain`, `structRow`, `clipTail`, `safeTitle`; measures through Pi TUI's `visibleWidth` | All |
+| `width.ts` | Width-safety helpers for the card primitives: `capPlain`, `structRow`, `clipTail`, `safeTitle`; measures through pi-tui's `visibleWidth` | All |
 | `context.ts` | Model-context protection: `stashOverflow` for capped output and temporary storage, plus `truncationMarker` | All |
 | `spinner.ts` | Spinner animation and `formatDuration`/`durationMeta`; width helpers are imported directly from `width.js` | All |
 | `ticker.ts` | Shared animation clock, using the smallest subscribed interval | `ticker`, `TickerHandle` |
