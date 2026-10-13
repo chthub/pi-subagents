@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { MSG_STATUS_KEY } from "../event-interpret.js";
-import extension, { handleMessage } from "../index.js";
+import extension, { handleMessage, targetsHint } from "../index.js";
 import { questionMessage } from "../notification.js";
 import type { AgentMessage } from "../protocol.js";
 import { AgentRegistry, type RegisteredAgent } from "../registry.js";
@@ -114,4 +114,32 @@ test("outbound @parent emits the payload, reports sent rather than acknowledged 
 	});
 	assert.equal(root.messages.length, 1);
 	assert.deepEqual(root.delivered, []);
+});
+
+test("unknown targets list the ids the model can use instead", async () => {
+	const tools = new Map<string, ToolDefinition>();
+	extension({
+		on: () => () => {},
+		registerTool: (tool: ToolDefinition) => tools.set(tool.name, tool),
+		registerCommand() {},
+		registerMessageRenderer() {},
+		registerToolRenderer() {},
+	} as unknown as ExtensionAPI);
+	const ctx = { mode: "rpc", cwd: "/tmp" } as unknown as Parameters<ToolDefinition["execute"]>[4];
+	const text = async (name: string, params: Record<string, string>) => {
+		const tool = tools.get(name);
+		assert.ok(tool);
+		const result = await tool.execute("call", params, undefined, undefined, ctx);
+		assert.equal(result.isError, true);
+		return (result.content[0] as { text: string }).text;
+	};
+	assert.equal(
+		await text("agent_send", { to: "@ghost", message: "hi" }),
+		"no such agent: ghost. No agents you can message.",
+	);
+	assert.equal(
+		await text("agent_stop", { agent_id: "@ghost" }),
+		"agent @ghost not found or already finished. No running or idle agents.",
+	);
+	assert.equal(targetsHint("Agents you can message", ["zoe", "@parent"]), " Agents you can message: @zoe, @parent.");
 });

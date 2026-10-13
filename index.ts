@@ -375,6 +375,13 @@ function toErrorResult(err: unknown): {
 	};
 }
 
+/** Appended to an unknown-target error so the model can retry with a valid id. */
+export function targetsHint(kind: string, ids: readonly string[]): string {
+	return ids.length > 0
+		? ` ${kind}: ${ids.map(atId).join(", ")}.`
+		: ` No ${kind.charAt(0).toLowerCase()}${kind.slice(1)}.`;
+}
+
 /** Spawn-failure tool result: isError + the reason (LLM + user card share it). */
 function spawnErrorResult(
 	started: { error: string },
@@ -1072,8 +1079,9 @@ export default function (pi: ExtensionAPI) {
 			if (!agent) {
 				// Card title needs the id: details.agentId drives titleFrom (the
 				// args key is snake_case agent_id, which titleFrom does not read).
+				const hint = targetsHint("Running or idle agents", registry.ids());
 				return {
-					content: [{ type: "text", text: `agent ${params.agent_id} not found or already finished.` }],
+					content: [{ type: "text", text: `agent ${params.agent_id} not found or already finished.${hint}` }],
 					details: { agentId, error: `agent ${params.agent_id} not found or already finished` },
 					isError: true,
 				};
@@ -1188,8 +1196,10 @@ export default function (pi: ExtensionAPI) {
 			}
 			const r = await handleMessage(pi, registry, { to: target, from: MY_AGENT_ID, message }, true);
 			if (!r.ok) {
+				// A known child that failed delivery needs no target list.
+				const hint = registry.lookup(target) ? "" : targetsHint("Agents you can message", messageTargets());
 				return {
-					content: [{ type: "text", text: r.error ?? "delivery failed" }],
+					content: [{ type: "text", text: `${r.error ?? "delivery failed"}${hint && `.${hint}`}` }],
 					details: { to: target, error: r.error },
 					isError: true,
 				};
@@ -1390,6 +1400,17 @@ export default function (pi: ExtensionAPI) {
 	const isRevivable = (agentId: string): boolean => {
 		const entry = roster.get(agentId);
 		return !!entry?.sessionPath && entry.indent === 0 && !registry.lookup(agentId) && !processes.get(agentId)?.isAlive;
+	};
+
+	/** agent_send targets: live and resumable direct children in spawn order, then @parent. */
+	const messageTargets = (): string[] => {
+		const ids = roster
+			.list()
+			.filter((entry) => registry.lookup(entry.agentId) || isRevivable(entry.agentId))
+			.map((entry) => entry.agentId);
+		for (const id of registry.ids()) if (!ids.includes(id)) ids.push(id);
+		if (HAS_PARENT) ids.push("@parent");
+		return ids;
 	};
 
 	/** Deliver a message typed in the agent view. */

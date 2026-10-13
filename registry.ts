@@ -101,6 +101,11 @@ export class AgentRegistry {
 		return this.agents.get(agentId);
 	}
 
+	/** Ids of the tracked agents, in registration order. */
+	ids(): string[] {
+		return [...this.agents.keys()];
+	}
+
 	/** Release an exited instance without stopping it or discarding its pending result. */
 	removeExited(agent: RegisteredAgent, result?: WidgetResult): void {
 		this.remove(agent.agentId, result, agent);
@@ -151,7 +156,7 @@ export class AgentRegistry {
 	 * deliver to a child / inject the parent LLM / error).
 	 */
 	route(msg: AgentMessage): RouteDecision {
-		return routeMessage(msg, [...this.agents.keys()], this.hasParent);
+		return routeMessage(msg, this.ids(), this.hasParent);
 	}
 
 	/** Point-to-point delivery to a direct child by exact id. */

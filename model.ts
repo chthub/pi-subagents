@@ -30,6 +30,31 @@ interface ModelLite {
 	id: string;
 }
 
+/** Cap on suggested models, so a large registry does not flood the error. */
+const MAX_SUGGESTIONS = 8;
+
+/**
+ * Appended to a not-available error: the models sharing the most name tokens
+ * with the request, or the provider list when none share any.
+ */
+function suggestModels(available: readonly ModelLite[], requested: string): string {
+	const tokens = (s: string) =>
+		normalize(s)
+			.split(/[^a-z0-9]+/)
+			.filter(Boolean);
+	const wanted = new Set(tokens(requested));
+	const ranked = available
+		.map((m) => ({
+			name: `${m.provider}/${m.id}`,
+			score: tokens(`${m.provider}/${m.id}`).filter((t) => wanted.has(t)).length,
+		}))
+		.filter((m) => m.score > 0)
+		.sort((a, b) => b.score - a.score)
+		.slice(0, MAX_SUGGESTIONS);
+	if (ranked.length > 0) return ` Closest available: ${ranked.map((m) => m.name).join(", ")}.`;
+	return ` Available providers: ${[...new Set(available.map((m) => m.provider))].join(", ")}.`;
+}
+
 /**
  * Resolve `originalModel` against `registry`; inherit `fallback` only when
  * no model was requested. Exact provider/id matches precede loose matches.
@@ -56,7 +81,7 @@ export function resolveModel(
 		// "provider/" with nothing after the slash matches nothing — an
 		// empty model name would otherwise be an `includes("")` truthy
 		// substring match against every model.
-		return { error: `Model "${originalModel}" not available.` };
+		return { error: `Model "${originalModel}" not available.${suggestModels(available, originalModel)}` };
 	}
 	const requestedId = modelName.trim().toLowerCase();
 	const normModel = normalize(requestedId);
@@ -78,6 +103,6 @@ export function resolveModel(
 	if (match) return { model: `${match.provider}/${match.id}` };
 
 	return {
-		error: `Model "${originalModel}" not available.`,
+		error: `Model "${originalModel}" not available.${suggestModels(available, originalModel)}`,
 	};
 }

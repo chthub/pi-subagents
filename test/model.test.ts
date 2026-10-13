@@ -103,6 +103,19 @@ describe("resolveModel", () => {
 		assert(r.error?.includes("No models available"));
 	});
 
+	it("suggests the closest available models when the request is not found", () => {
+		const r = resolveModel(registry, fallback, "anthropic/claude-opus-9");
+		assert.equal(
+			r.error,
+			'Model "anthropic/claude-opus-9" not available. Closest available: anthropic/claude-sonnet-4.',
+		);
+	});
+
+	it("lists providers when no model shares a name token with the request", () => {
+		const r = resolveModel(registry, fallback, "llama-70b");
+		assert.equal(r.error, 'Model "llama-70b" not available. Available providers: anthropic, openai, google.');
+	});
+
 	it("treats dots/colons as separators matching hyphens", () => {
 		const r = resolveModel(registry, fallback, "gemini:2.0:flash");
 		assert.equal(r.model, "google/gemini-2.0-flash");

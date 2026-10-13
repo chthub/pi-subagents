@@ -5,9 +5,9 @@ description: Coordinate delegated work with agent_spawn, agent_send, and agent_s
 
 # Sub-agent coordination
 
-These instructions are for the main agent. Assign work from the current request; do not invent predefined agent roles or expand the user's authorization.
+These instructions are for the main agent. Assign work from the current request; do not expand the user's authorization. Do small tasks, or tasks that depend on context you already hold, yourself; a sub-agent starts with a fresh context and must rebuild it.
 
-1. **Specify the task.** Give each sub-agent the goal, necessary context and paths, files it may change, and expected result. Include any decisions or limits it cannot infer from its separate context.
+1. **Specify the task.** Write tasks and messages in complete, plain sentences; a sub-agent has a separate context, so shorthand, abbreviations, and words joined without spaces are ambiguous to it. Keep code identifiers, paths, and commands exact. A new task states the goal, necessary context and paths, files it may change, limits or decisions it cannot infer, and how the result will be accepted; give these separate paragraphs when the task is longer than a few lines.
 2. **Parallelize independent work.** If a task needs an undecided interface, settle that interface first. Otherwise keep working or wait for results; do not poll or repeatedly ask for completion. Handle communication between sub-agents yourself, using their actual available tools rather than asking them to contact one another.
 3. **Keep file changes separate.** Only one agent may change a given file at a time, including the main agent. A checking task is read-only unless edits were explicitly assigned. When a check finds a defect, pass the concrete finding to the agent responsible for that file rather than changing it concurrently.
 4. **Continue related work.** Prefer the original sub-agent for questions, revisions, additional tests, or later stages of the same task. Start a new one for independent parallel work, an independent check needing fresh context, or when the existing agent is unsuitable—not merely because its previous turn ended.
