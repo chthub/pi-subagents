@@ -115,9 +115,8 @@ let viewUi: ExtensionUIContext | undefined;
 
 /**
  * Lazily-captured UI handle for the child→parent channel (extension_ui_request /
- * setStatus under the reserved key). Tool executes refresh it every call —
- * a sub-agent that spawned children has run its own execute first, so the
- * ref is always warm before any inbound @parent message needs to go up.
+ * setStatus under the reserved key). Tool executes refresh it every call,
+ * before an outbound @parent message is emitted.
  */
 let uiRef: { setStatus(key: string, text: string | undefined): void } | undefined;
 
@@ -133,9 +132,8 @@ function ensureWidget(ctx: { mode: string; ui: unknown }): AgentWidget | null {
 /**
  * Refresh the child→parent handle from any tool execute. Every execute runs
  * with a UI context (rpc children too — their setStatus emits the
- * extension_ui_request event stream the parent consumes), and a sub-agent
- * must have run its own execute before it can spawn children, so the ref
- * is always warm before any inbound @parent message needs to go up.
+ * extension_ui_request event stream the parent consumes). Inbound @parent
+ * messages are injected locally and do not use this upward transport.
  */
 function captureUi(ctx: { mode: string; ui: unknown }): void {
 	uiRef = ctx.ui as { setStatus(key: string, text: string | undefined): void };
@@ -400,12 +398,21 @@ function spawnErrorResult(
  *   unknown     → explicit error (routing is the LLM's job, hop by hop);
  *                 on the inbound path the sender is told best-effort
  */
-async function handleMessage(
+export async function handleMessage(
 	pi: ExtensionAPI,
 	registry: AgentRegistry,
 	msg: AgentMessage,
 	outbound: boolean,
 ): Promise<{ ok: boolean; verb?: string; error?: string }> {
+	// @parent is relative to the sender. On the inbound path, this process
+	// IS that parent, even at the root where registry.route would reject it.
+	if (!outbound && msg.to === "@parent") {
+		pi.sendMessage(questionMessage(msg.from, registry.lookup(msg.from)?.label, msg.message), {
+			deliverAs: "steer",
+			triggerTurn: true,
+		});
+		return { ok: true, verb: "delivered" };
+	}
 	const d = registry.route(msg);
 	switch (d.kind) {
 		case "child": {
@@ -416,18 +423,9 @@ async function handleMessage(
 			return ok ? { ok: true, verb: "delivered" } : { ok: false, error: `delivery to ${d.childId} failed` };
 		}
 		case "parent": {
-			if (outbound) {
-				// I am addressing my own parent — point-to-point up; the parent's
-				// extension injects it into its LLM session.
-				uiRef?.setStatus(MSG_STATUS_KEY, JSON.stringify(d.message));
-				return { ok: true, verb: "delivered" };
-			}
-			// My child addressed "@parent" (= me): inject into my session.
-			pi.sendMessage(questionMessage(d.message.from, registry.lookup(d.message.from)?.label, d.message.message), {
-				deliverAs: "steer",
-				triggerTurn: true,
-			});
-			return { ok: true, verb: "delivered" };
+			// Outbound only: setStatus is fire-and-forget, not a delivery ACK.
+			uiRef?.setStatus(MSG_STATUS_KEY, JSON.stringify(d.message));
+			return { ok: true, verb: "sent" };
 		}
 		case "error": {
 			if (!outbound && msg.from) {

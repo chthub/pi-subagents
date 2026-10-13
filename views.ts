@@ -179,7 +179,10 @@ export const sendView = createToolView<Record<string, unknown>, Record<string, u
 	tail: (ctx) => {
 		if (ctx.status === "error") return "failed";
 		if (ctx.status === "processing") return "sending\u2026";
-		return "delivered";
+		// The upward RPC event has no delivery ACK. Use the target rather than
+		// result text so restored/legacy cards follow the same semantics.
+		const target = ctx.result?.data?.to ?? ctx.args?.to;
+		return target === "@parent" ? "sent" : "delivered";
 	},
 	// The message body shows on the card (head preview: first 10 rows, write-like).
 	preview: "head",

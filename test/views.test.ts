@@ -1,6 +1,69 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { agentTitle, atId, spawnFields, titleFrom } from "../views.js";
+import { initTheme } from "@earendil-works/pi-coding-agent";
+import { agentTitle, atId, sendView, spawnFields, titleFrom } from "../views.js";
+
+initTheme("light");
+const theme = { bg: (_k: string, t: string) => t, fg: (_k: string, t: string) => t, bold: (t: string) => t } as never;
+
+function renderSend(details: Record<string, unknown>, args: Record<string, unknown> = {}, isError = false) {
+	return sendView
+		.renderResult({ content: [], details }, { expanded: false, isPartial: false }, theme, {
+			args,
+			state: {},
+			isPartial: false,
+			isError,
+		})
+		.render(100)
+		.join("\n");
+}
+
+for (const details of [{ to: "@parent" }, { data: { to: "@parent" } }, {}]) {
+	test(`send card displays sent for @parent: ${JSON.stringify(details)}`, () => {
+		const out = renderSend(details, { to: "@parent" });
+		assert.match(out, /agent_send.*@parent.*sent/);
+		assert.doesNotMatch(out, /delivered/);
+	});
+}
+
+test("send card keeps delivered for direct children, including resumed children", () => {
+	for (const details of [{ to: "zoe" }, { to: "zoe", label: "README", agentId: "zoe" }]) {
+		assert.match(renderSend(details), /agent_send.*@zoe.*delivered/);
+	}
+});
+
+test("send card uses the resolved result target before call arguments", () => {
+	assert.match(renderSend({ to: "@parent" }, { to: "zoe" }), /@parent.*sent/);
+	assert.match(renderSend({ to: "zoe" }, { to: "@parent" }), /@zoe.*delivered/);
+});
+
+test("failed sends to @parent never display success", () => {
+	for (const out of [
+		renderSend({ to: "@parent", error: "root session has no parent" }),
+		renderSend({ to: "@parent" }, {}, true),
+	]) {
+		assert.match(out, /agent_send.*@parent.*failed/);
+		assert.doesNotMatch(out, /\bsent\b|delivered/);
+	}
+});
+
+test("send card displays sending while processing and sent on completion", () => {
+	const ctx = { args: { to: "@parent" }, state: {}, isPartial: true, invalidate() {} };
+	try {
+		const out = sendView.renderCall(ctx.args, theme, ctx).render(100).join("\n");
+		assert.match(out, /agent_send.*@parent.*sending/);
+		assert.doesNotMatch(out, /\bsent\b|delivered/);
+	} finally {
+		// End the processing render's animation subscription.
+		const done = sendView.renderResult(
+			{ content: [], details: { to: "@parent" } },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...ctx, isPartial: false },
+		);
+		assert.match(done.render(100).join("\n"), /agent_send.*@parent.*sent/);
+	}
+});
 
 test("atId adds @ exactly once", () => {
 	assert.equal(atId("max"), "@max");
