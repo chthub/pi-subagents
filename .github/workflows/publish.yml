@@ -1,0 +1,33 @@
+# Publish to npm when a version tag is pushed: git tag v0.2.2 && git push origin v0.2.2
+# Uses npm trusted publishing (OIDC): no npm token or one-time password.
+name: Publish
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  id-token: write # lets npm verify this run came from this workflow
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24 # trusted publishing needs npm >= 11.5.1
+          registry-url: https://registry.npmjs.org
+      - name: Tag matches package.json version
+        run: |
+          version=$(node -p "require('./package.json').version")
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match package.json version $version" >&2
+            exit 1
+          fi
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run check
+      - run: npm test
+      - run: npm publish
