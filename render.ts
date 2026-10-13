@@ -8,6 +8,7 @@
  */
 
 import type { Theme } from "@earendil-works/pi-coding-agent";
+import { Container, MouseRegion } from "@earendil-works/pi-tui";
 import type { NotificationDetails, QuestionDetails } from "./types.js";
 import {
 	type BodyComponent,
@@ -24,9 +25,31 @@ import {
 } from "./ui/card.js";
 import { formatDuration } from "./ui/spinner.js";
 
-/** Notification card: the internal card grammar inside a custom-message shell. */
-function renderNotificationCard(config: CardConfig, theme: Theme): BodyComponent {
-	return cardShell(theme, "customMessageBg", renderCardUi(config, theme));
+// Pi rebuilds custom renderers on invalidation, but does not give them an
+// expansion callback. Keep local folding on the message identity, not the
+// agent id (one agent can have several distinct replies in the transcript).
+const messageFolds = new WeakMap<object, { hostExpanded: boolean; expanded: boolean }>();
+
+/** Clickable custom-message card; Ctrl+O still controls all cards. */
+function renderNotificationCard(message: object, config: CardConfig, theme: Theme): Component {
+	let fold = messageFolds.get(message);
+	if (!fold || fold.hostExpanded !== config.expanded) {
+		fold = { hostExpanded: config.expanded, expanded: config.expanded };
+		messageFolds.set(message, fold);
+	}
+	const state = fold;
+	const content = new Container();
+	const rebuild = () => {
+		content.clear();
+		content.addChild(cardShell(theme, "customMessageBg", renderCardUi({ ...config, expanded: state.expanded }, theme)));
+	};
+	rebuild();
+	return new MouseRegion(content, (event) => {
+		if (event.type !== "click" || event.button !== "left") return;
+		state.expanded = !state.expanded;
+		rebuild();
+		return { handled: true, render: true };
+	});
 }
 
 /** Missing details: a dim one-liner inside the same custom-message shell. */
@@ -77,6 +100,7 @@ export function renderNotification(
 	const body: CardBody = d.result?.trim() ? { message: d.result.trim() } : {};
 
 	return renderNotificationCard(
+		message,
 		{
 			header: { icon, name: "Agent", title: d.label, tail: status, meta: metaParts },
 			body,
@@ -96,6 +120,7 @@ export function renderQuestion(
 	const d = message.details;
 	if (!d) return renderNoDetailsCard(theme);
 	return renderNotificationCard(
+		message,
 		{
 			header: {
 				icon: { glyph: "?", color: "accent" },

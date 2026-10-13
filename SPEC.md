@@ -30,6 +30,7 @@ Provide mechanisms for callers to compose, not a workflow engine. Do not hard-co
 - Place status icons first and retain the card wrapper through pending, success, and failure.
 - Separate metadata with `·`; time belongs in header metadata, paths in the footer. Align body content to the card's left edge, with blank lines between sections.
 - Collapsed output uses a preview and expansion hint; expanded output retains the complete rendering source. Cap model-facing text at bash's output limits, not the UI source.
+- In fullscreen mode, left-clicking a completion notification or question card toggles only that message. Local folding survives renderer invalidation; Ctrl+O remains the global expand/collapse control. Regular mode uses Ctrl+O.
 - Missing output uses a dim parenthesized placeholder. Show meaningful activity as execution changes state; long silence without feedback is a defect. Use `working…` only when no more specific operation is available.
 - Development previews must reflect actual behavior. Do not add third-party UI libraries.
 - Use `StringEnum` for parameter enums for Gemini compatibility. For blank lines, use `Text("\n" + content)`, not `Text("")`. Never call `context.invalidate()` synchronously from a render function.

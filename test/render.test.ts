@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { initTheme } from "@earendil-works/pi-coding-agent";
+import { CustomMessageComponent, initTheme } from "@earendil-works/pi-coding-agent";
+import type { Component, TuiMouseEvent } from "@earendil-works/pi-tui";
 import { renderNotification, renderQuestion } from "../render.js";
 import { safeTitle } from "../ui/width.js";
 
@@ -157,4 +158,97 @@ test("a non-blocking question renders as its own card, not a completion", () => 
 	assert.ok(text.includes('? Agent "@zoe — schema" asks (non-blocking)'), text);
 	assert.ok(text.includes("Should I include views?"));
 	assert.ok(!text.includes("completed"));
+});
+
+function mouse(component: Component, overrides: Partial<TuiMouseEvent> = {}) {
+	return component.handleMouse?.({
+		type: "click",
+		button: "left",
+		x: 2,
+		y: 2,
+		screenX: 2,
+		screenY: 2,
+		width: 120,
+		height: component.render(120).length,
+		shift: false,
+		alt: false,
+		ctrl: false,
+		...overrides,
+	});
+}
+
+const longReply = Array.from({ length: 12 }, (_, i) => `reply line ${i + 1}`).join("\n");
+
+for (const status of ["completed", "failed", "stopped"] as const) {
+	test(`${status} notification clicks toggle only that message, including separate replies from the same agent`, () => {
+		const details = { status, agent_id: "zoe", label: "@zoe — schema", result: longReply };
+		const card = renderNotification({ details }, { expanded: false }, theme);
+		const other = renderNotification({ details }, { expanded: false }, theme);
+		const collapsed = renderText(card, 120);
+		assert.ok(collapsed.includes("to expand"));
+		assert.ok(!collapsed.includes("reply line 1\n"));
+
+		for (const event of [
+			{ type: "click", button: "right" },
+			{ type: "press", button: "left" },
+			{ type: "drag", button: "left" },
+			{ type: "wheel", button: "none", wheelDelta: -1 },
+		] as const) {
+			assert.equal(mouse(card, event), undefined);
+			assert.equal(renderText(card, 120), collapsed);
+		}
+		assert.equal(mouse(card)?.handled, true);
+		assert.ok(renderText(card, 120).includes(longReply));
+		assert.ok(renderText(other, 120).includes("to expand"));
+		mouse(card);
+		assert.equal(renderText(card, 120), collapsed);
+	});
+}
+
+test("question cards are individually clickable", () => {
+	const card = renderQuestion(
+		{ details: { agent_id: "zoe", label: "schema", question: longReply } },
+		{ expanded: false },
+		theme,
+	);
+	const collapsed = renderText(card, 120);
+	assert.ok(collapsed.includes("to expand"));
+	mouse(card);
+	assert.ok(renderText(card, 120).includes(longReply));
+	mouse(card);
+	assert.equal(renderText(card, 120), collapsed);
+});
+
+test("Pi custom-message rebuilds preserve local folding; global expansion overrides it", () => {
+	const message = {
+		role: "custom" as const,
+		customType: "subagent-notification",
+		content: "model payload",
+		display: true,
+		timestamp: 0,
+		details: { status: "completed" as const, agent_id: "zoe", label: "schema", result: longReply },
+	};
+	const host = new CustomMessageComponent(message, (m, options, t) =>
+		renderNotification(m as typeof message, options, t),
+	);
+	assert.ok(renderText(host, 120).includes("to expand"));
+	mouse(host, { y: 3 });
+	assert.ok(renderText(host, 120).includes(longReply));
+	host.invalidate();
+	assert.ok(renderText(host, 120).includes(longReply), "resize/theme invalidation keeps the local expansion");
+	host.setOutputPad(2);
+	assert.ok(renderText(host, 120).includes(longReply), "padding rebuild keeps the local expansion");
+
+	host.setExpanded(true);
+	assert.ok(renderText(host, 120).includes(longReply));
+	mouse(host, { y: 3 });
+	assert.ok(renderText(host, 120).includes("to expand"), "a globally expanded card can be collapsed individually");
+	host.invalidate();
+	assert.ok(renderText(host, 120).includes("to expand"));
+	host.setExpanded(false);
+	assert.ok(renderText(host, 120).includes("to expand"));
+	host.setExpanded(true);
+	assert.ok(renderText(host, 120).includes(longReply), "next Ctrl+O overrides the local collapse");
+	host.setExpanded(false);
+	assert.ok(renderText(host, 120).includes("to expand"));
 });
