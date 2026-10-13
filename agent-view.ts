@@ -6,7 +6,8 @@
  * has an editor: what you type goes to that agent (a side chat — its
  * answers are not reported to the main agent). Ctrl+X twice stops a live
  * agent. Esc returns to the main conversation. A finished agent is revived
- * from its session file by the first message you send.
+ * from its session file by the first message you send. Dragging over the
+ * text selects it with pi's own fullscreen selection (copied on release).
  */
 
 import type { AssistantMessage } from "@earendil-works/pi-ai";
@@ -21,6 +22,7 @@ import {
 	Key,
 	matchesKey,
 	type TUI,
+	type TuiAltScreen,
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
 	truncateToWidth,
@@ -81,6 +83,8 @@ export class AgentView implements Component, Focusable {
 		| undefined;
 	private dragGrabOffset: number | undefined;
 	private scrollbarHovered = false;
+	/** A left button is down for pi's text selection: blank the rail so copies skip it. */
+	private selecting = false;
 	private expanded = false;
 	private notice = "";
 	private sending = false;
@@ -137,6 +141,8 @@ export class AgentView implements Component, Focusable {
 		this.dragGrabOffset = undefined;
 		this.scrollbarHovered = false;
 		this.scrollbar = undefined;
+		// The selection is in screen cells: it must not stay over the main conversation.
+		this.resetSelection();
 		this.unsubscribeEvents?.();
 		this.unsubscribeRoster();
 		this.animation?.unsubscribe();
@@ -182,7 +188,7 @@ export class AgentView implements Component, Focusable {
 		this.tui.requestRender();
 	}
 
-	handleMouse(event: TuiMouseEvent): TuiMouseEventResult {
+	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
 		const rail = this.scrollbar;
 		const wasActive = this.scrollbarHovered || this.dragGrabOffset !== undefined;
 		this.scrollbarHovered =
@@ -193,10 +199,18 @@ export class AgentView implements Component, Focusable {
 			return { handled: true };
 		}
 		if (event.type === "release") {
-			this.dragGrabOffset = undefined;
-			return { handled: true, render: wasActive !== this.scrollbarHovered };
+			if (this.dragGrabOffset !== undefined) {
+				this.dragGrabOffset = undefined;
+				return { handled: true, render: wasActive !== this.scrollbarHovered };
+			}
+			// pi copies the selection from the current frame right after this
+			// returns; the rail comes back on the next render.
+			this.selecting = false;
+			this.tui.requestRender();
+			return undefined;
 		}
-		if (event.type === "drag" && this.dragGrabOffset !== undefined) {
+		if (event.type === "drag") {
+			if (this.dragGrabOffset === undefined) return undefined; // extends pi's text selection
 			if (event.button === "left") this.scrollToPointer(event.y, this.dragGrabOffset);
 			else this.dragGrabOffset = undefined;
 			return { handled: true };
@@ -212,10 +226,21 @@ export class AgentView implements Component, Focusable {
 				if (!onThumb) this.scrollToPointer(event.y, this.dragGrabOffset);
 				return { handled: true, capture: true };
 			}
+			// Unhandled presses start pi's own text selection (an overlay hit never
+			// reaches the main conversation underneath).
+			this.selecting = event.button === "left";
+			if (wasActive) this.tui.requestRender();
+			return undefined;
 		}
-		// Keep overlay input from falling through to the main conversation.
-		// In particular, the synthetic click after release must not jump again.
+		// The synthetic click after a release must not jump again; handling it
+		// also clears a click's empty selection.
 		return { handled: true, render: wasActive !== (this.scrollbarHovered || this.dragGrabOffset !== undefined) };
+	}
+
+	/** Drop pi's fullscreen text selection: it marks screen cells, not conversation text. */
+	private resetSelection(): void {
+		this.selecting = false;
+		(this.tui as Partial<Pick<TuiAltScreen, "resetTextSelection">>).resetTextSelection?.();
 	}
 
 	private scrollToPointer(y: number, grabOffset: number): void {
@@ -271,7 +296,7 @@ export class AgentView implements Component, Focusable {
 				const thumb = i >= thumbTop && i < thumbTop + thumbHeight;
 				visible[i] =
 					truncateToWidth(visible[i], contentWidth, "", true) +
-					this.theme.fg(thumb ? "accent" : "borderMuted", thumb ? thumbGlyph : "│");
+					(this.selecting ? " " : this.theme.fg(thumb ? "accent" : "borderMuted", thumb ? thumbGlyph : "│"));
 			}
 		} else {
 			this.scrollbar = undefined;
@@ -449,6 +474,7 @@ export class AgentView implements Component, Focusable {
 
 	private scrollBy(lines: number): void {
 		this.scroll = Math.max(0, this.scroll + lines);
+		this.resetSelection(); // the text under it moves
 		this.tui.requestRender();
 	}
 

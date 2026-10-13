@@ -66,11 +66,12 @@ function rail(view: AgentView, width = 120) {
 function setup(
 	loadMessages: () => Promise<unknown[]> = async () => [],
 	extra: Partial<Pick<AgentViewDeps, "canStop" | "stop" | "footer">> = {},
+	tuiExtra: Record<string, unknown> = {},
 ) {
 	let listener: ((event: RpcEvent) => void) | undefined;
 	const terminal = { rows: 40 };
 	const view = new AgentView(
-		{ terminal, requestRender() {} } as never,
+		{ terminal, requestRender() {}, ...tuiExtra } as never,
 		{ fg: (_color: string, text: string) => text, bold: (text: string) => text } as never,
 		{ matches: () => false } as never,
 		{
@@ -164,7 +165,7 @@ test("track press jumps toward the pointer and subsequent drags preserve the gra
 	await Promise.resolve();
 	const bottom = rail(view);
 	const pointerY = bottom.y + Math.floor(bottom.height / 2);
-	assert.equal(view.handleMouse(mouse("press", { y: pointerY, screenY: pointerY + 50, screenX: 129 })).capture, true);
+	assert.equal(view.handleMouse(mouse("press", { y: pointerY, screenY: pointerY + 50, screenX: 129 }))?.capture, true);
 	const middle = rail(view);
 	assert.equal(middle.thumbY, pointerY - Math.floor(middle.thumbHeight / 2));
 	assert.notEqual(middle.content, bottom.content);
@@ -179,10 +180,48 @@ test("body/header/editor presses and non-primary clicks do not grab the scrollba
 	await Promise.resolve();
 	const initial = rail(view);
 	for (const fields of [{ x: 118 }, { y: 0 }, { y: initial.y + initial.height }, { button: "right" as const }]) {
-		assert.notEqual(view.handleMouse(mouse("press", fields)).capture, true);
+		assert.notEqual(view.handleMouse(mouse("press", fields))?.capture, true);
 		view.handleMouse(mouse("drag", { y: -100 }));
+		view.handleMouse(mouse("release", { y: -100 }));
 		assert.equal(rail(view).content, initial.content);
 	}
+});
+
+test("left drags over the conversation fall through to pi's text selection, without the rail", async (t) => {
+	const content = Array.from({ length: 100 }, (_, i) => `line ${i}`).join("\n");
+	let resets = 0;
+	const { view } = setup(
+		async () => [message([{ type: "text", text: content }], "stop")],
+		{},
+		{
+			resetTextSelection: () => resets++,
+		},
+	);
+	t.after(() => view.dispose());
+	await Promise.resolve();
+	const initial = rail(view);
+	const railColumn = () =>
+		view
+			.render(120)
+			.slice(initial.y, initial.y + initial.height)
+			.map((line) => stripTerminalSequences(line).at(-1));
+	assert.equal(view.handleMouse(mouse("press", { x: 5, y: initial.y })), undefined);
+	assert.ok(
+		railColumn().every((glyph) => glyph === " "),
+		"the rail is blank while the button is down, so copies skip it",
+	);
+	assert.equal(view.handleMouse(mouse("drag", { x: 20, y: initial.y + 3 })), undefined);
+	assert.equal(view.handleMouse(mouse("release", { x: 20, y: initial.y + 3 })), undefined);
+	assert.equal(rail(view).content, initial.content, "selecting does not scroll");
+	assert.ok(
+		railColumn().every((glyph) => glyph === "│" || glyph === "┃"),
+		"the rail returns after release",
+	);
+	assert.equal(view.handleMouse(mouse("click", { x: 5, y: initial.y }))?.handled, true);
+	view.handleMouse(mouse("wheel", { x: 5, wheelDelta: -3 }));
+	assert.equal(resets, 1, "scrolling drops the selection: the text under it moves");
+	view.dispose();
+	assert.equal(resets, 2, "closing the view drops it from the main conversation");
 });
 
 test("resize, loss of focus and disappearance of the rail cancel active drags", async (t) => {
@@ -204,8 +243,9 @@ test("resize, loss of focus and disappearance of the rail cancel active drags", 
 	assert.equal(rail(view).content, geometry.content);
 	view.handleMouse(mouse("press", { y: geometry.thumbY }));
 	view.render(1);
-	assert.notEqual(view.handleMouse(mouse("press", { x: 0 })).capture, true);
+	assert.notEqual(view.handleMouse(mouse("press", { x: 0 }))?.capture, true);
 	view.handleMouse(mouse("drag", { y: -100 }));
+	view.handleMouse(mouse("release", { y: -100 }));
 	assert.equal(rail(view).content, geometry.content);
 });
 
@@ -232,7 +272,7 @@ test("hover widens the thumb without rewrapping content or changing its position
 	await Promise.resolve();
 	const initial = view.render(120).map(stripTerminalSequences);
 	const geometry = rail(view);
-	assert.equal(view.handleMouse(mouse("move", { button: "none", y: geometry.y })).render, true);
+	assert.equal(view.handleMouse(mouse("move", { button: "none", y: geometry.y }))?.render, true);
 	const hovered = view.render(120).map(stripTerminalSequences);
 	assert.ok(hovered.some((line) => line.endsWith("█")));
 	assert.deepEqual(
@@ -242,11 +282,11 @@ test("hover widens the thumb without rewrapping content or changing its position
 	assert.equal(rail(view).thumbY, geometry.thumbY);
 	assert.equal(rail(view).content, geometry.content);
 	assert.equal(
-		view.handleMouse(mouse("move", { button: "none", y: geometry.thumbY })).render,
+		view.handleMouse(mouse("move", { button: "none", y: geometry.thumbY }))?.render,
 		false,
 		"moving within the rail does not need a hover repaint",
 	);
-	assert.equal(view.handleMouse(mouse("move", { button: "none", x: 118 })).render, true);
+	assert.equal(view.handleMouse(mouse("move", { button: "none", x: 118 }))?.render, true);
 	assert.deepEqual(view.render(120).map(stripTerminalSequences), initial);
 });
 
@@ -260,7 +300,7 @@ test("drag stays wide outside the rail and release restores hover-dependent widt
 	assert.ok(view.render(120).some((line) => stripTerminalSequences(line).endsWith("█")));
 	view.handleMouse(mouse("drag", { x: 0, y: -100 }));
 	assert.ok(view.render(120).some((line) => stripTerminalSequences(line).endsWith("█")));
-	assert.equal(view.handleMouse(mouse("release", { x: 0, y: -100 })).render, true);
+	assert.equal(view.handleMouse(mouse("release", { x: 0, y: -100 }))?.render, true);
 	assert.ok(!view.render(120).some((line) => stripTerminalSequences(line).endsWith("█")));
 	view.handleMouse(mouse("press", { y: geometry.y }));
 	view.handleMouse(mouse("release", { y: geometry.y }));
@@ -298,8 +338,9 @@ test("short content shows a full scrollbar thumb without an invalid position", a
 	await Promise.resolve();
 	const lines = view.render(120).map(stripTerminalSequences);
 	assert.ok(lines.slice(3, -4).every((line) => line.endsWith("┃")));
-	assert.notEqual(view.handleMouse(mouse("press")).capture, true);
+	assert.notEqual(view.handleMouse(mouse("press"))?.capture, true);
 	view.handleMouse(mouse("drag", { y: -100 }));
+	view.handleMouse(mouse("release", { y: -100 }));
 	assert.deepEqual(view.render(120).map(stripTerminalSequences), lines);
 });
 
