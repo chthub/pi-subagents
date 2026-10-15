@@ -202,6 +202,16 @@ preview.ts          — development-only storybook
   - Running: queue after the current response and tool batch.
   - Do not send a bare `steer` command to an idle child: it may acknowledge the command without starting work.
 
+### Child-launch integration
+
+- Immediately before every `AgentProcess` construction, both spawn and saved-session revival, synchronously emit `pi-subagents:child-launch:v1` through `pi.events`. Each emission receives a fresh mutable `{ env: Record<string, string>, extensions: string[], error?: string }`, initially `{ env: {}, extensions: [] }`.
+- Listeners finish all mutations synchronously. Do not await promises or accept delayed contributions. Validate the final environment as a plain string record (ordinary or null prototype), and extensions as an array of nonempty string paths. Reject invalid types, invalid environment names, and NUL-containing strings; never coerce injected values.
+- Any supplied `error` rejects the launch; malformed error values also fail. Listeners use sanitized generic text without paths or credentials. Report a generic rejection without echoing listener text. Emitter exceptions propagate without being silently ignored.
+- Pi's event bus catches/logs listener exceptions internally and its emit returns no listener results. Therefore listeners must catch their own failures and synchronously set `error` for fail-closed behavior. The launcher cannot detect swallowed listener failures or asynchronous work.
+- Copy validated launch data, then merge injected environment with `childEnv` identity/depth last: identity always wins. RpcClient still overlays these additions on `process.env`. With no listeners, inherited environment behavior is unchanged. The mechanism neither changes `PI_CODING_AGENT_DIR` itself nor transfers credentials.
+- `AgentProcessOptions.extensions?: string[]` adds one `--extension <path>` pair per distinct path, preserving first occurrence order, for both new sessions and `--session` revivals. This supplements normal extension discovery. Relative paths use the child's working directory.
+- Launch environment and extension paths are ephemeral construction options, never stored by pi-subagents in transcripts or roster snapshots; obtain fresh contributions on every revival. No footer-specific dependency or account policy belongs here. Listener owners, not pi-subagents, clean up their hook subscriptions.
+
 ### Lifecycle
 
 ```text

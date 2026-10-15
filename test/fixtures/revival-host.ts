@@ -1,13 +1,40 @@
-import { readFileSync } from "node:fs";
+import assert from "node:assert/strict";
+import { appendFileSync, readFileSync } from "node:fs";
 import { setTimeout as delay } from "node:timers/promises";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { createEventBus, SessionManager } from "@earendil-works/pi-coding-agent";
+import { CHILD_LAUNCH_EVENT, type ChildLaunch } from "../../child-launch.js";
 import extension from "../../index.js";
 import { ROSTER_STATE_TYPE } from "../../roster-state.js";
 
 const tools = new Map<string, ToolDefinition>();
 const handlers = new Map<string, ((event: unknown, ctx: ExtensionContext) => unknown)[]>();
 const notices: Parameters<ExtensionAPI["sendMessage"]>[0][] = [];
+const events = createEventBus();
+const launchLog = process.env.REVIVAL_TEST_LAUNCH_LOG as string;
+if (process.env.REVIVAL_TEST_HOOK !== "none") {
+	events.on(CHILD_LAUNCH_EVENT, (data) => {
+		const launch = data as ChildLaunch;
+		appendFileSync(launchLog, `${JSON.stringify({ kind: "hook", initial: launch })}\n`);
+		if (process.env.REVIVAL_TEST_HOOK === "error") {
+			try {
+				throw new Error("private detail");
+			} catch {
+				launch.error = "Integration unavailable";
+			}
+		} else if (process.env.REVIVAL_TEST_HOOK === "malformed-error") {
+			Object.assign(launch, { error: 42 });
+		} else if (process.env.REVIVAL_TEST_HOOK === "invalid") {
+			Object.assign(launch.env, { INVALID: 42 });
+		} else {
+			launch.env.LAUNCH_ONLY = "launch-only-value";
+			launch.env.PI_SUBAGENT_AGENT_ID = "spoof";
+			launch.env.PI_SUBAGENT_DEPTH = "99";
+			launch.env.PI_SUBAGENT_MAX_DEPTH = "99";
+			launch.extensions.push("/example/launch-only-extension.ts", "/example/launch-only-extension.ts");
+		}
+	});
+}
 const manager = SessionManager.inMemory(process.cwd());
 manager.appendCustomEntry(ROSTER_STATE_TYPE, {
 	entries: [
@@ -30,6 +57,8 @@ const ctx = {
 	ui: { setStatus() {}, notify() {} },
 } as unknown as Parameters<ToolDefinition["execute"]>[4];
 extension({
+	events,
+	getThinkingLevel: () => "off",
 	on: (name: string, handler: (event: unknown, ctx: ExtensionContext) => unknown) => {
 		const current = handlers.get(name) ?? [];
 		current.push(handler);
@@ -52,9 +81,20 @@ for (const handler of handlers.get("session_start") ?? []) await handler({}, ctx
 const send = tools.get("agent_send");
 if (!send) throw new Error("agent_send must be registered");
 try {
-	const deliver = (message: string) => send.execute(message, { to: "max", message }, undefined, undefined, ctx);
+	const execute = async (tool: ToolDefinition, params: Record<string, unknown>) => {
+		try {
+			return await tool.execute("call", params, undefined, undefined, ctx);
+		} catch (error) {
+			return { isError: true, content: [{ type: "text", text: (error as Error).message }] };
+		}
+	};
+	const deliver = (message: string) => execute(send, { to: "max", message });
 	const results = [];
-	if (process.env.REVIVAL_TEST_MODE === "idle-exit") {
+	if (process.env.REVIVAL_TEST_MODE === "spawn") {
+		const spawn = tools.get("agent_spawn");
+		if (!spawn) throw new Error("agent_spawn must be registered");
+		results.push(await execute(spawn, { prompt: "first", label: "launch test", run_in_background: true }));
+	} else if (process.env.REVIVAL_TEST_MODE === "idle-exit") {
 		const waitUntil = async (ready: () => boolean) => {
 			const deadline = Date.now() + 3000;
 			while (!ready()) {
@@ -86,6 +126,7 @@ try {
 	} else {
 		results.push(...(await Promise.all(["first", "second", "third"].map(deliver))));
 	}
+	assert.doesNotMatch(JSON.stringify(manager.getBranch()), /launch-only-value|launch-only-extension/);
 	process.stdout.write(JSON.stringify(results));
 } finally {
 	for (const handler of handlers.get("session_shutdown") ?? []) await handler({ reason: "quit" }, ctx);

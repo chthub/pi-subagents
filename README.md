@@ -200,6 +200,40 @@ Ask a sub‑agent to research the project structure, but only let it use read an
 
 Sub‑agent won't see any other tools. Read‑only exploration with a cheaper model is a good pattern for research tasks.
 
+### Child-launch integration event
+
+Other extensions can opt child RPC processes into their own integration without a dependency on pi-subagents or a separate agent directory. Immediately before each new or revived `AgentProcess`, pi-subagents synchronously emits `pi.events.emit("pi-subagents:child-launch:v1", launch)` with fresh mutable data:
+
+```ts
+{ env: Record<string, string>, extensions: string[], error?: string }
+```
+
+`env` and `extensions` start as `{}` and `[]`. Listeners must finish synchronously (no `async`, promises, or delayed mutations). For example, inside an extension factory:
+
+```ts
+const unsubscribe = pi.events.on("pi-subagents:child-launch:v1", (data) => {
+  const launch = data as {
+    env: Record<string, string>;
+    extensions: string[];
+    error?: string;
+  };
+  try {
+    launch.env.MY_CHILD_SYNC = "1";
+    launch.extensions.push("/absolute/path/to/child-bridge.ts");
+  } catch {
+    launch.error = "Child integration unavailable";
+  }
+});
+pi.on("session_shutdown", () => unsubscribe());
+```
+
+- Environment additions overlay the inherited process environment; pi-subagents' child identity/depth values win over additions. Without listeners, inherited environment behavior is unchanged. This hook does not itself change `PI_CODING_AGENT_DIR` or transfer credentials; use non-secret coordination data, not tokens.
+- Extension paths are passed as deduplicated `--extension <path>` arguments on both new sessions and `--session` revivals, alongside normal Pi extension discovery. Prefer absolute paths; relative paths resolve from the child's working directory.
+- Launch data is validated and copied before construction, never persisted by pi-subagents in its roster or transcripts. Invalid environment/extension types or invalid strings abort the launch rather than being coerced.
+- Any supplied `error` aborts the launch, including malformed non-string values. Use sanitized generic text without paths or tokens; pi-subagents reports a generic rejection without echoing the supplied text. Emitter failures propagate.
+- **Pi catches and logs listener exceptions internally.** The hook cannot detect those exceptions or await listener work. Listeners must catch their own preparation failures and synchronously set `error` to fail closed.
+- Listener owners manage subscription cleanup; pi-subagents never unregisters another extension's handlers.
+
 ## How it works
 
 Every sub‑agent is a resident `pi --mode rpc` child with a persisted session:

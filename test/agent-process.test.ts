@@ -218,6 +218,28 @@ describe("AgentProcess — spawnAndSend", () => {
 		assert.ok(!makeAgent({ cwd: "/tmp", label: "x" }).fake.args.includes("--tools"));
 	});
 
+	for (const resumeSession of [undefined, "/saved/session.jsonl"]) {
+		it(`deduplicates extra --extension paths (${resumeSession ? "resume" : "new session"})`, () => {
+			const extensions = ["/example/bridge.ts", "/example/path with spaces.ts", "/example/bridge.ts"];
+			const { fake } = makeAgent({ cwd: "/tmp", label: "x", extensions, resumeSession });
+			assert.deepEqual(fake.args, [
+				"--extension",
+				"/example/bridge.ts",
+				"--extension",
+				"/example/path with spaces.ts",
+				...(resumeSession ? ["--session", resumeSession] : ["--name", "x"]),
+			]);
+			assert.equal(extensions.length, 3, "does not mutate caller data");
+		});
+
+		it(`omits extra CLI arguments by default (${resumeSession ? "resume" : "new session"})`, () => {
+			const expected = resumeSession ? ["--session", resumeSession] : ["--name", "x"];
+			for (const extensions of [undefined, []]) {
+				assert.deepEqual(makeAgent({ cwd: "/tmp", label: "x", extensions, resumeSession }).fake.args, expected);
+			}
+		});
+	}
+
 	it("passes thinking level through as --thinking", () => {
 		const { fake } = makeAgent({ cwd: "/tmp", model: "google/gemini-x", label: "explore", thinking: "high" });
 		assert.deepEqual(fake.args, ["--model", "google/gemini-x", "--thinking", "high", "--name", "explore"]);

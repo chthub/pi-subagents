@@ -48,6 +48,7 @@ import { Type } from "typebox";
 import { type AgentFooterData, finishedContextUsage, gitBranch } from "./agent-footer.js";
 import { type AgentCompletion, AgentProcess } from "./agent-process.js";
 import { AgentView } from "./agent-view.js";
+import { prepareChildLaunch } from "./child-launch.js";
 import { registerCompletionInbox } from "./completion-inbox.js";
 import { canSpawnAt, envInt, loadConfig } from "./config.js";
 import { type AgentActivity, type AgentTreeEvent, MSG_STATUS_KEY, TREE_STATUS_KEY } from "./event-interpret.js";
@@ -774,6 +775,7 @@ export default function (pi: ExtensionAPI) {
 						}),
 			});
 
+			const launch = prepareChildLaunch(pi.events, childEnv(agentId));
 			const agent = new AgentProcess({
 				agentId,
 				cwd: ctx.cwd,
@@ -787,9 +789,8 @@ export default function (pi: ExtensionAPI) {
 				// Root children stay resident by default (follow-ups skip the restart);
 				// a sub-agent's own children exit unless asked — agent_send resumes them.
 				persistent: params.persistent ?? !HAS_PARENT,
-				// Identity for in-tree messaging: PI_SUBAGENT_AGENT_ID marks this
-				// process as a child (agent_send is registered on every instance).
-				env: childEnv(agentId),
+				// Launch integrations cannot override this child's in-tree identity.
+				...launch,
 				// Child→parent messages re-enter the router on this hop. Tree telemetry
 				// from deeper spawns forwards up (depth + 1) or lands on the root widget.
 				onMessage: onChildMessage,
@@ -1315,6 +1316,7 @@ export default function (pi: ExtensionAPI) {
 			onFold: () => {},
 		});
 		const live = createLiveChannels({ surfaces: { getWidget: () => widget ?? undefined, tree } });
+		const launch = prepareChildLaunch(pi.events, childEnv(agentId));
 		const agent: AgentProcess = new AgentProcess({
 			agentId,
 			label: entry.label,
@@ -1323,7 +1325,7 @@ export default function (pi: ExtensionAPI) {
 			timeoutMs: entry.timeoutMs,
 			persistent: true,
 			resumeSession: entry.sessionPath,
-			env: childEnv(agentId),
+			...launch,
 			onMessage: onChildMessage,
 			onTreeEvent: (event) => subtree.onTreeEvent(event),
 			onIdle: (outcome) => {

@@ -69,6 +69,8 @@ export interface AgentProcessOptions {
 	thinking?: string;
 	/** Tool allowlist (comma-joined into --tools; agent_send is always added). */
 	tools?: string[];
+	/** Additional extension paths (--extension per distinct path), including on revival. */
+	extensions?: string[];
 	/** Short task label (notification card). */
 	label: string;
 	/** Short human-readable id ("max", "zoe") assigned by the registry (name-gen.ts). */
@@ -213,6 +215,7 @@ export class AgentProcess {
 		if (options.thinking) args.push("--thinking", options.thinking);
 		// agent_send is the child's channel to @parent: an allowlist never removes it.
 		if (options.tools !== undefined) args.push("--tools", [...new Set([...options.tools, "agent_send"])].join(","));
+		for (const extension of new Set(options.extensions)) args.push("--extension", extension);
 		if (options.resumeSession) {
 			// Revive: the session file already carries its name, model and thinking.
 			args.push("--session", options.resumeSession);

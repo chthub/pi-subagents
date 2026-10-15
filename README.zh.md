@@ -200,6 +200,40 @@ Pi 调用 `agent_send` 向运行中的 agent 注入 steering（当前模型响�
 
 子 agent 看不到其他任何工具。只读探索 + 便宜模型是调研任务的推荐模式。
 
+### 子进程启动集成事件
+
+其他扩展可通过事件让子 RPC 进程加入自己的集成，不必依赖 pi-subagents，也不必另设 agent 目录。每次新建或复活 `AgentProcess` 前，pi-subagents 同步发出 `pi.events.emit("pi-subagents:child-launch:v1", launch)`，载荷是全新的可变对象：
+
+```ts
+{ env: Record<string, string>, extensions: string[], error?: string }
+```
+
+`env`、`extensions` 初始分别为 `{}`、`[]`。监听器必须同步完成，不能用 `async`、Promise 或延迟修改。例如，在扩展工厂中：
+
+```ts
+const unsubscribe = pi.events.on("pi-subagents:child-launch:v1", (data) => {
+  const launch = data as {
+    env: Record<string, string>;
+    extensions: string[];
+    error?: string;
+  };
+  try {
+    launch.env.MY_CHILD_SYNC = "1";
+    launch.extensions.push("/absolute/path/to/child-bridge.ts");
+  } catch {
+    launch.error = "Child integration unavailable";
+  }
+});
+pi.on("session_shutdown", () => unsubscribe());
+```
+
+- 环境变量补充项覆盖继承的进程环境，但 pi-subagents 的子代理身份与深度字段优先。没有监听器时，环境继承行为不变。此机制本身不修改 `PI_CODING_AGENT_DIR`，也不传递凭据；请只注入非敏感协调信息，不要注入 token。
+- 扩展路径去重后作为 `--extension <path>` 参数传入，新会话和带 `--session` 的复活均适用，不替代 Pi 原有扩展发现机制。建议使用绝对路径；相对路径以子进程工作目录为基准。
+- 构造进程前会校验并复制载荷；pi-subagents 不把它写进 roster 或会话记录。环境变量、扩展字段的类型或字符串无效时拒绝启动，不做隐式类型转换。
+- 只要提供了 `error` 就拒绝启动，非字符串等畸形值同样拒绝。请使用不含路径或 token 的通用错误文字；pi-subagents 只报告通用拒绝原因，不回显原文。事件发出本身的异常继续向上传递。
+- **Pi 会在内部捕获并记录监听器异常。** 此钩子无法检测这些异常，也不等待监听器的异步工作。监听器必须自行捕获准备阶段的失败，并同步设置 `error`，才能确保失败时不启动子进程。
+- 订阅清理由监听器所属扩展负责；pi-subagents 不注销其他扩展的处理器。
+
 ## 工作原理
 
 每个 sub-agent 都是带持久化 session 的常驻 `pi --mode rpc` 子进程：
