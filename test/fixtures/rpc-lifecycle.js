@@ -18,10 +18,21 @@ input.on("line", (line) => {
 		process.stdout.write(
 			[
 				{ ...response, data: { disposition: "started" } },
+				{ type: "agent_start" },
 				{ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: output }] } },
 				{ type: "agent_settled", aborted: false },
 			].map((record) => `${JSON.stringify(record)}\n`).join(""),
 		);
+		if (command.message === "/background") {
+			// Like an extension's sendMessage({ triggerTurn: true }): no parent
+			// prompt response accompanies this later resident wake.
+			setTimeout(() => {
+				output = `background answer ${++turns}`;
+				write({ type: "agent_start" });
+				write({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: output }] } });
+				write({ type: "agent_settled", aborted: false });
+			}, 30);
+		}
 		return;
 	}
 	const data = command.type === "get_state"

@@ -72,9 +72,16 @@ extension({
 	getActiveTools: () => [],
 	getAllTools: () => [],
 	appendEntry: (type: string, data: unknown) => manager.appendCustomEntry(type, data),
-	sendMessage(notice: Parameters<ExtensionAPI["sendMessage"]>[0]) {
+	sendMessage(notice: Parameters<ExtensionAPI["sendMessage"]>[0], options: Parameters<ExtensionAPI["sendMessage"]>[1]) {
 		notices.push(notice);
 		manager.appendCustomMessageEntry(notice.customType, notice.content, notice.display ?? true, notice.details);
+		if (options?.triggerTurn && process.env.REVIVAL_TEST_MODE?.startsWith("internal-")) {
+			// The token-free parent consumes the notification and settles. Without
+			// this lifecycle event the real inbox correctly keeps later results queued.
+			setImmediate(() => {
+				for (const handler of handlers.get("agent_settled") ?? []) void handler({ aborted: false }, ctx);
+			});
+		}
 	},
 } as unknown as ExtensionAPI);
 for (const handler of handlers.get("session_start") ?? []) await handler({}, ctx);
@@ -90,7 +97,43 @@ try {
 	};
 	const deliver = (message: string) => execute(send, { to: "max", message });
 	const results = [];
-	if (process.env.REVIVAL_TEST_MODE === "spawn") {
+	if (process.env.REVIVAL_TEST_MODE?.startsWith("internal-")) {
+		const statusHistory: string[] = [];
+		const seen = new Set<string>();
+		// appendEntry is the persisted roster boundary used by the real UI.
+		const deadline = Date.now() + 5000;
+		const observe = () => {
+			for (const entry of manager.getBranch()) {
+				if (entry.type !== "custom" || entry.customType !== ROSTER_STATE_TYPE || seen.has(entry.id)) continue;
+				seen.add(entry.id);
+				const rows = (entry.data as { entries: { status: string }[] }).entries;
+				const status = rows.at(-1)?.status;
+				if (status && status !== statusHistory.at(-1)) statusHistory.push(status);
+			}
+		};
+		if (process.env.REVIVAL_TEST_MODE === "internal-spawn") {
+			const spawn = tools.get("agent_spawn");
+			if (!spawn) throw new Error("agent_spawn must be registered");
+			results.push(await execute(spawn, { prompt: "first", label: "background test", run_in_background: true }));
+		} else {
+			results.push(await deliver("first"));
+		}
+		while (notices.filter((notice) => notice.customType === "subagent-notification").length < 2) {
+			observe();
+			if (Date.now() >= deadline) throw new Error("Timed out waiting for internal wake notification");
+			await delay(5);
+		}
+		observe();
+		const replies = notices
+			.filter((notice) => notice.customType === "subagent-notification")
+			.map((notice) => JSON.parse(String(notice.content)));
+		assert.deepEqual(
+			replies.map((reply) => reply.result),
+			["initial reply", "background reply"],
+		);
+		assert.notEqual(replies[0].completion_id, replies[1].completion_id);
+		assert.ok(statusHistory.join(",").includes("idle,running,idle"), JSON.stringify(statusHistory));
+	} else if (process.env.REVIVAL_TEST_MODE === "spawn") {
 		const spawn = tools.get("agent_spawn");
 		if (!spawn) throw new Error("agent_spawn must be registered");
 		results.push(await execute(spawn, { prompt: "first", label: "launch test", run_in_background: true }));

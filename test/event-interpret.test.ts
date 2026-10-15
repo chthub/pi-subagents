@@ -16,6 +16,12 @@ function expect(raw: Record<string, unknown>): AgentEvent[] {
 	return interpretEvent({ type: "x", ...raw });
 }
 
+describe("interpretEvent — agent_start", () => {
+	it("maps to a started event", () => {
+		assert.deepEqual(interpretEvent({ type: "agent_start" }), [{ type: "started" }]);
+	});
+});
+
 describe("interpretEvent — agent_settled", () => {
 	it("maps to a settled event", () => {
 		assert.deepEqual(interpretEvent({ type: "agent_settled" }), [{ type: "settled" }]);
@@ -229,7 +235,7 @@ describe("interpretEvent — extension_ui_request (in-tree messages)", () => {
 describe("interpretEvent — unknown events", () => {
 	it("maps nothing", () => {
 		assert.deepEqual(interpretEvent({ type: "extension_error" }), []);
-		assert.deepEqual(interpretEvent({ type: "agent_start" }), []);
+		assert.deepEqual(interpretEvent({ type: "turn_start" }), []);
 	});
 });
 

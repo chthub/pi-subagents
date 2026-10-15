@@ -24,7 +24,7 @@ interface LaunchRecord {
 
 function runHost(
 	t: TestContext,
-	mode: "parallel" | "rejected" | "idle-exit" | "spawn",
+	mode: "parallel" | "rejected" | "idle-exit" | "spawn" | "internal-spawn" | "internal-revive",
 	hook: "none" | "inject" | "error" | "invalid" | "malformed-error" = "none",
 ) {
 	const dir = mkdtempSync(join(tmpdir(), "pi-revival-test-"));
@@ -143,6 +143,15 @@ for (const reject of [false, true]) {
 			prompts.map((entry) => entry.message),
 			reject ? ["first"] : ["first", "second", "third"],
 		);
+	});
+}
+
+for (const mode of ["internal-spawn", "internal-revive"] as const) {
+	test(`internal wakes update roster and deliver final replies through the production inbox (${mode})`, (t) => {
+		const { results, prompts } = runHost(t, mode);
+		assert.equal(results.length, 1);
+		assert.notEqual(results[0].isError, true);
+		assert.equal(prompts.length, 1, "the internal wake must not need another parent prompt");
 	});
 }
 

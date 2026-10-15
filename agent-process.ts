@@ -91,6 +91,8 @@ export interface AgentProcessOptions {
 	onMessage?: (message: AgentMessage) => void;
 	/** Tree telemetry from this child's own spawns (extension_ui_request, tree key) — forward or apply. */
 	onTreeEvent?: (event: AgentTreeEvent) => void;
+	/** A resident starts a fresh turn, whether from a prompt or an internal trigger. */
+	onWake?: () => void;
 	/** A woken persistent agent's turn ended: "completed" → idle; "failed"
 	 *  (model error or crash) and "stopped" (timeoutMs) → report + clean up. */
 	onIdle?: (outcome: WakeOutcome) => void;
@@ -184,7 +186,8 @@ export class AgentProcess {
 	/** The parent is waiting for the current turn's answer: it started the
 	 *  turn (spawn, agent_send) or messaged during it. A user side-chat message
 	 *  in the same turn never cancels that; a turn only the user started (a
-	 *  side chat from the agent view) is not reported up. */
+	 *  side chat from the agent view) is not reported up. Internal wakes (for
+	 *  example a background-bash result) inherit the preceding turn's owner. */
 	private parentWaiting = false;
 	/** Pending wake-turn limit: the timeoutMs clock, then the abort grace. */
 	private wakeTimer: NodeJS.Timeout | undefined;
@@ -208,6 +211,7 @@ export class AgentProcess {
 		this.onActivityChange = options.onActivityChange;
 		this.onMessage = options.onMessage;
 		this.onTreeEvent = options.onTreeEvent;
+		this.onWake = options.onWake;
 		this.onIdle = options.onIdle;
 
 		const args: string[] = [];
@@ -315,16 +319,19 @@ export class AgentProcess {
 	 */
 	async sendMessage(text: string, origin: "parent" | "user" = "parent"): Promise<boolean> {
 		if (this.status === "failed" || this.status === "stopped" || this.client.isClosed) return false;
+		// An idle user interaction is a privacy boundary, even if an extension
+		// handles the prompt and triggers its model run before or after the RPC
+		// response. agent_start has no source ID, so later autonomous work stays
+		// private until an accepted parent prompt explicitly claims it again.
+		// A completed snapshot already froze its owner; active parent work is
+		// unaffected by user side-chat input.
+		if (origin === "user" && this.status === "completed") this.parentWaiting = false;
 		let accepted = false;
 		const accept = (response: RpcResponse) => {
 			if (accepted || !response.success || this.isHandled(response)) return;
 			accepted = true;
 			if (this.status === "completed") {
-				this.turn = { sequence: this.turn.sequence + 1 };
-				this.agentError = null;
-				this.status = "running";
-				this.parentWaiting = origin === "parent";
-				this.startWakeClock();
+				this.startWake(origin === "parent");
 			} else if (origin === "parent") {
 				this.parentWaiting = true;
 			}
@@ -516,6 +523,7 @@ export class AgentProcess {
 	private readonly onActivityChange: ((activity: AgentActivity) => void) | undefined;
 	private readonly onMessage: ((message: AgentMessage) => void) | undefined;
 	private readonly onTreeEvent: ((event: AgentTreeEvent) => void) | undefined;
+	private readonly onWake: (() => void) | undefined;
 	private readonly onIdle: ((outcome: WakeOutcome) => void) | undefined;
 
 	private terminalStatus(): TerminalStatus {
@@ -581,6 +589,15 @@ export class AgentProcess {
 		// message delivery.
 		for (const ev of interpretEvent(event)) {
 			switch (ev.type) {
+				case "started":
+					// Extensions can resume an idle resident without a parent RPC
+					// prompt (e.g. background-bash's triggerTurn). Give that run a
+					// fresh settlement and inherit ownership. agent_start also fires
+					// during retries: an already-running turn must not be split.
+					if (this.persistent && this.status === "completed" && !this.client.isClosed) {
+						this.startWake(this.parentWaiting);
+					}
+					break;
 				case "settled": {
 					const wake = this.done && this.persistent && this.status === "running";
 					const status = this.terminalStatus();
@@ -646,6 +663,15 @@ export class AgentProcess {
 		this.captureCompletion(outcome);
 		this.status = outcome;
 		this.onIdle?.(outcome);
+	}
+
+	private startWake(owedToParent: boolean): void {
+		this.turn = { sequence: this.turn.sequence + 1 };
+		this.agentError = null;
+		this.status = "running";
+		this.parentWaiting = owedToParent;
+		this.startWakeClock();
+		this.onWake?.();
 	}
 
 	/** A wake starts a new turn: restart the turn clock and its timeoutMs limit. */

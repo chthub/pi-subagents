@@ -52,6 +52,50 @@ it("fast RPC settlement preserves turn ownership, output, and idle rows across w
 	}
 });
 
+it("delivers an internal background-result wake without another parent prompt", { timeout: 5000 }, async () => {
+	const notifications: AgentCompletion[] = [];
+	let delivered!: () => void;
+	const wakeDelivered = new Promise<void>((resolve) => {
+		delivered = resolve;
+	});
+	const registry = new AgentRegistry({
+		notify: (_agent, completion) => {
+			notifications.push(completion);
+			if (notifications.length === 2) delivered();
+		},
+	});
+	const agent: AgentProcess = new AgentProcess(
+		{
+			cwd: path.dirname(fixture),
+			agentId: "background",
+			label: "background",
+			persistent: true,
+			onIdle: () => {
+				void agent.completionSnapshot().then((completion) => {
+					if (completion.owedToParent) return registry.complete(agent, completion);
+				});
+			},
+		},
+		{ createClient: (options) => new RpcClient({ ...options, command: process.execPath, args: [fixture] }) },
+	);
+	try {
+		await agent.spawnAndSend("/background");
+		registry.register(agent);
+		const first = await agent.waitForCompletion();
+		await registry.complete(agent, first);
+		await wakeDelivered;
+		assert.deepEqual(
+			notifications.map((completion) => completion.output),
+			["answer 1", "background answer 2"],
+		);
+		assert.notEqual(notifications[0].completionId, notifications[1].completionId);
+		assert.equal(registry.lookup(agent.agentId), agent);
+		assert.equal(agent.status, "completed");
+	} finally {
+		await agent.stop();
+	}
+});
+
 it("an idle resident killed by signal releases its address without creating another completion", async () => {
 	let client: RpcClient | undefined;
 	const notifications: AgentCompletion[] = [];

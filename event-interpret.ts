@@ -35,6 +35,7 @@ export type AgentActivity =
 
 /** Closed union of interpreted events — the domain vocabulary. */
 export type AgentEvent =
+	| { type: "started" }
 	| { type: "settled" }
 	| { type: "thinking" }
 	| { type: "tool_call"; activity: Extract<AgentActivity, { kind: "tool" }> }
@@ -117,6 +118,7 @@ function summarizeArgs(name: string, args: unknown): string {
  * own jsonl layer ignores unknown records.
  */
 export function interpretEvent(raw: RpcEvent): AgentEvent[] {
+	if (raw.type === "agent_start") return [{ type: "started" }];
 	if (raw.type === "agent_settled") return [{ type: "settled" }];
 
 	if (raw.type === "message_update") {

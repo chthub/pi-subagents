@@ -35,6 +35,21 @@ rl.on("line", (line) => {
 					: { data: cmd.type === "get_state" ? { sessionFile: "saved.jsonl", sessionId: "test" } : {} }),
 			})}\n`,
 		);
+		if (!rejected && cmd.type === "prompt" && process.env.REVIVAL_TEST_MODE?.startsWith("internal-")) {
+			setTimeout(() => {
+				const write = (record) => process.stdout.write(`${JSON.stringify(record)}\n`);
+				write({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "initial reply" }] } });
+				write({ type: "agent_settled" });
+				setTimeout(() => {
+					write({ type: "agent_start" });
+					// Allow the host to observe running before the final report.
+					setTimeout(() => {
+						write({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "background reply" }] } });
+						write({ type: "agent_settled" });
+					}, 100);
+				}, 100);
+			}, 50);
+		}
 		if (!rejected && cmd.type === "prompt" && process.env.REVIVAL_TEST_MODE === "idle-exit") {
 			setTimeout(() => {
 				process.stdout.write(

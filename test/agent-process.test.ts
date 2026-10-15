@@ -113,6 +113,7 @@ class FakeClient {
 		};
 		messages?: Array<{ role?: string; stopReason?: string; errorMessage?: unknown; content?: unknown[] }>;
 		message?: {
+			role?: string;
 			content?: Array<{
 				type?: string;
 				text?: unknown;
@@ -778,6 +779,140 @@ describe("AgentProcess — who is owed a turn's answer", () => {
 		const u = user.agent.waitForCompletion();
 		user.fake.emitSettled();
 		assert.equal((await u).owedToParent, false);
+	});
+});
+
+describe("AgentProcess — internal wakes", () => {
+	it("reports a background-result wake with a fresh snapshot and inherited parent ownership", async () => {
+		const { agent, fake, outcomes } = await idleAgent();
+		const first = await agent.completionSnapshot();
+		fake.emitEvent({ type: "agent_start" });
+		assert.equal(agent.status, "running");
+		assert.equal(agent.parentIsWaiting, true);
+		assert.notEqual(agent.completionId, first.completionId);
+		fake.emitEvent({
+			type: "message_end",
+			message: { role: "assistant", content: [{ type: "text", text: "background command finished" }] },
+		});
+		fake.emitSettled();
+		const wake = await agent.completionSnapshot();
+		assert.deepEqual(outcomes, ["completed"]);
+		assert.equal(wake.output, "background command finished");
+		assert.equal(wake.owedToParent, true);
+		assert.equal((await agent.waitForCompletion()).completionId, first.completionId);
+		fake.emitSettled();
+		assert.deepEqual(outcomes, ["completed"], "a repeated settlement must not report twice");
+		await agent.stop();
+	});
+
+	for (const order of ["before-response", "after-response", "settled-before-response"] as const) {
+		it(`keeps handled idle user commands private (${order})`, async () => {
+			const { agent, fake } = await idleAgent();
+			const first = await agent.completionSnapshot();
+			const finish = () => {
+				fake.emitEvent({
+					type: "message_end",
+					message: { role: "assistant", content: [{ type: "text", text: "private command answer" }] },
+				});
+				fake.emitSettled();
+			};
+			const send = fake.sendCommand.bind(fake);
+			fake.promptDisposition = "handled";
+			fake.sendCommand = async (command, onResponse) => {
+				if (command.type === "prompt" && order !== "after-response") {
+					fake.emitEvent({ type: "agent_start" });
+					if (order === "settled-before-response") finish();
+				}
+				return send(command, onResponse);
+			};
+			assert.equal(await agent.sendMessage("/private-command", "user"), false);
+			if (order === "after-response") fake.emitEvent({ type: "agent_start" });
+			if (order !== "settled-before-response") finish();
+			assert.equal((await agent.completionSnapshot()).owedToParent, false);
+			assert.equal(first.owedToParent, true, "the prior completed result must not be retracted");
+			fake.promptDisposition = "started";
+			await agent.sendMessage("parent follow-up");
+			assert.equal(agent.parentIsWaiting, true, "accepted parent input reclaims the next turn");
+			fake.emitSettled();
+			await agent.stop();
+		});
+	}
+
+	it("an idle user command fences future autonomous work even when it starts no run itself", async () => {
+		const { agent, fake } = await idleAgent();
+		const first = await agent.completionSnapshot();
+		fake.promptDisposition = "handled";
+		await agent.sendMessage("/status", "user");
+		assert.equal(agent.completionId, first.completionId);
+		fake.emitEvent({ type: "agent_start" });
+		fake.emitSettled();
+		assert.equal((await agent.completionSnapshot()).owedToParent, false);
+		await agent.stop();
+	});
+
+	it("publishes a wake transition exactly once before activity, including internal wakes", async () => {
+		let wakes = 0;
+		const { agent, fake } = await idleAgent({ onWake: () => wakes++ });
+		fake.emitEvent({ type: "agent_start" });
+		assert.equal(wakes, 1);
+		fake.emitEvent({ type: "agent_start" });
+		assert.equal(wakes, 1);
+		fake.emitSettled();
+		await agent.sendMessage("next");
+		assert.equal(wakes, 2);
+		fake.emitEvent({ type: "agent_start" });
+		assert.equal(wakes, 2);
+		fake.emitSettled();
+		await agent.stop();
+	});
+
+	it("keeps user-only internal continuations private", async () => {
+		const { agent, fake } = await idleAgent();
+		await agent.sendMessage("side chat", "user");
+		fake.emitSettled();
+		const userTurn = await agent.completionSnapshot();
+		fake.emitEvent({ type: "agent_start" });
+		fake.emitSettled();
+		const continuation = await agent.completionSnapshot();
+		assert.notEqual(continuation.completionId, userTurn.completionId);
+		assert.equal(continuation.owedToParent, false);
+		await agent.stop();
+	});
+
+	it("does not split an active turn on retries or explicit-wake agent_start events", async () => {
+		const { agent, fake, outcomes } = await idleAgent();
+		await agent.sendMessage("continue");
+		const id = agent.completionId;
+		fake.emitEvent({ type: "agent_start" });
+		fake.emitEvent({ type: "agent_start" });
+		assert.equal(agent.completionId, id);
+		fake.emitSettled();
+		assert.deepEqual(outcomes, ["completed"]);
+		fake.emitEvent({ type: "agent_start" });
+		const internalId = agent.completionId;
+		await agent.sendMessage("also check this");
+		assert.equal(agent.completionId, internalId);
+		fake.emitSettled();
+		assert.deepEqual(outcomes, ["completed", "completed"]);
+		await agent.stop();
+	});
+
+	it("applies the wake deadline to internal continuations", async () => {
+		const { agent, fake, outcomes } = await idleAgent({ timeoutMs: 10 });
+		fake.emitEvent({ type: "agent_start" });
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		assert.ok(fake.commands.some((command) => command.type === "abort"));
+		fake.emitSettled();
+		assert.deepEqual(outcomes, ["stopped"]);
+		await agent.stop();
+	});
+
+	it("reports a crash during an internal continuation", async () => {
+		const { agent, fake, outcomes } = await idleAgent();
+		fake.emitEvent({ type: "agent_start" });
+		fake.emitExit(1);
+		assert.deepEqual(outcomes, ["failed"]);
+		assert.equal((await agent.completionSnapshot()).owedToParent, true);
 	});
 });
 

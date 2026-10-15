@@ -140,10 +140,17 @@ function captureUi(ctx: { mode: string; ui: unknown }): void {
 	uiRef = ctx.ui as { setStatus(key: string, text: string | undefined): void };
 }
 
-/** Narrow TUI adapter: AgentWidget → WidgetSurface (registry seam). */
-function widgetSurface(): WidgetSurface | null {
+/** Registry state changes must reach the roster even without a TUI widget. */
+function widgetSurface(): WidgetSurface {
 	const w = widget;
-	if (!w) return null;
+	if (!w) {
+		return {
+			add: (agent, status = "running") => roster.setStatus(agent.agentId, status),
+			remove: (agentId, result) => roster.setStatus(agentId, result ?? "stopped"),
+			setStatus: (agentId, status) => roster.setStatus(agentId, status),
+			dispose() {},
+		};
+	}
 	return {
 		add: (agent, status) => w.add(agent as AgentProcess, status),
 		remove: (agentId, result) => w.remove(agentId, result),
@@ -795,6 +802,7 @@ export default function (pi: ExtensionAPI) {
 				// from deeper spawns forwards up (depth + 1) or lands on the root widget.
 				onMessage: onChildMessage,
 				onTreeEvent: (event) => subtree.onTreeEvent(event),
+				onWake: () => roster.setStatus(agentId, "running"),
 				// A wake finished. Completed: its output must reach this spawner's
 				// context — symmetric with the first-completion notification, an
 				// agent_send "delivered" alone would leave the answer unread.
@@ -1328,6 +1336,7 @@ export default function (pi: ExtensionAPI) {
 			...launch,
 			onMessage: onChildMessage,
 			onTreeEvent: (event) => subtree.onTreeEvent(event),
+			onWake: () => roster.setStatus(agentId, "running"),
 			onIdle: (outcome) => {
 				const settled = reportWake(agent);
 				if (outcome === "completed") {
