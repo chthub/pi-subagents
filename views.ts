@@ -83,7 +83,13 @@ export function spawnFields(args: unknown, d: SubagentDetails | undefined): Card
 	fields.push(resolvedField("model", a.model, d?.model));
 	fields.push(resolvedField("thinking", a.thinking, d?.thinking));
 	fields.push(
-		a.tools?.length ? { key: "tools", value: a.tools.join(", ") } : { key: "tools", value: "all", note: "(default)" },
+		a.tools === undefined
+			? { key: "tools", value: "all", note: "(default)" }
+			: {
+					key: "tools",
+					value: a.tools.join(", ") || "[]",
+					note: a.tools.length === 0 ? "(agent_send always kept)" : undefined,
+				},
 	);
 	if (a.prompt) fields.push({ key: "prompt", value: a.prompt, fold: PROMPT_FOLD_LINES });
 	return fields;

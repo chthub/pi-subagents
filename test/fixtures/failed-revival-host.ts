@@ -196,9 +196,10 @@ try {
 		priorStop = execute("agent_stop", { agent_id: "max" });
 		await waitUntil(() => records().some((entry) => entry.kind === "closing"), "explicit stop began before new send");
 	}
-	const isView = mode.endsWith("view");
+	const reportToParent = mode.endsWith("continue");
+	const isView = mode.endsWith("view") || reportToParent;
 	const message = mode.startsWith("ambiguous") ? "ambiguous request" : "new request";
-	if (isView) submitView(message);
+	if (isView) submitView(reportToParent ? `/continue ${message}` : message);
 	const pending = isView ? waitView() : send(message);
 	if (mode.startsWith("rejected-replacement")) {
 		release();
@@ -265,7 +266,7 @@ try {
 		} else if (!mode.startsWith("healthy-running") && !mode.startsWith("ambiguous")) {
 			await waitUntil(() => latestStatus() === "idle", "replacement/healthy follow-up becomes idle");
 			await flush();
-			if (isView)
+			if (isView && !reportToParent)
 				assert.ok(
 					!notices.some((notice) => notice.result === "reply:new request"),
 					"a user-only turn must stay private",

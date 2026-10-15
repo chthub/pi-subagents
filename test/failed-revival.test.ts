@@ -94,7 +94,7 @@ function assertReplacement(outcome: Outcome) {
 	return { launches, prompts };
 }
 
-for (const origin of ["tool", "view"]) {
+for (const origin of ["tool", "view", "continue"]) {
 	for (const terminal of ["recover", "stopped"]) {
 		test(`${origin}: new explicit send replaces a ${terminal === "recover" ? "failed" : "stopped"} live child with fresh launch options`, (t) => {
 			const outcome = run(t, `${terminal}-${origin}`);
@@ -113,8 +113,8 @@ for (const origin of ["tool", "view"]) {
 			);
 			assert.equal(
 				outcome.notices.filter((notice) => notice.result === "reply:new request").length,
-				origin === "tool" ? 1 : 0,
-				"only parent-owned turns notify the parent",
+				origin === "view" ? 0 : 1,
+				"tool sends and /continue notify the parent; ordinary view messages stay private",
 			);
 			assert.equal(outcome.notices.filter((notice) => notice.result === "reply:parent follow-up").length, 1);
 		});
@@ -187,12 +187,12 @@ for (const origin of ["tool", "view"]) {
 			["old request", "new request"],
 		);
 		const failure = outcome.notices.filter((notice) => notice.result === "synthetic quota still exhausted");
-		assert.equal(failure.length, origin === "tool" ? 1 : 0);
+		assert.equal(failure.length, origin === "view" ? 0 : 1);
 		assert.ok(failure.every((notice) => notice.status === "failed"));
 	});
 }
 
-for (const origin of ["tool", "view"]) {
+for (const origin of ["tool", "view", "continue"]) {
 	for (const action of ["stop", "shutdown"]) {
 		test(`${origin}: ${action} begun during asynchronous recovery cleanup cancels all pending sends before replacement launch`, (t) => {
 			const outcome = run(t, `cancel-${action}-${origin}`);

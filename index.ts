@@ -1319,8 +1319,8 @@ export default function (pi: ExtensionAPI) {
 	 * Bring a finished agent back from its session file with a message as its
 	 * next turn. It stays resident afterwards (idle between turns), addressable
 	 * by agent_send and agent_stop like any persistent agent. A turn the parent
-	 * started (agent_send) reports its answer here like a completion; a turn
-	 * the user started in the agent view is a side chat and reports nothing.
+	 * started (agent_send or the view's /continue) reports its answer here like
+	 * a completion; ordinary messages in the agent view remain private side chats.
 	 */
 	const startRevival = async (
 		agentId: string,
@@ -1468,12 +1468,17 @@ export default function (pi: ExtensionAPI) {
 		return ids;
 	};
 
-	/** Deliver a message typed in the agent view. */
-	const sendFromView = async (agentId: string, text: string, cwd: string): Promise<string | undefined> => {
+	/** Ordinary view messages are private; /continue explicitly requests a parent result. */
+	const sendFromView = async (
+		agentId: string,
+		text: string,
+		cwd: string,
+		origin: "parent" | "user",
+	): Promise<string | undefined> => {
 		const live = processes.get(agentId);
-		if (revivals.has(agentId) || !live || needsRecovery(live)) return revive(agentId, text, cwd, "user");
+		if (revivals.has(agentId) || !live || needsRecovery(live)) return revive(agentId, text, cwd, origin);
 		const wasIdle = roster.get(agentId)?.status === "idle";
-		const ok = await live.sendMessage(text, "user");
+		const ok = await live.sendMessage(text, origin);
 		if (!ok) return "Delivery failed.";
 		if (wasIdle) roster.setStatus(agentId, live.status === "running" ? "running" : "idle");
 		return undefined;
@@ -1536,7 +1541,7 @@ export default function (pi: ExtensionAPI) {
 							processKey: () => processes.get(agentId),
 							loadMessages: () => loadMessages(agentId),
 							streamingSnapshot: () => processes.get(agentId)?.getStreamingSnapshot(),
-							send: (text) => sendFromView(agentId, text, cwd),
+							send: (text, origin) => sendFromView(agentId, text, cwd, origin),
 							canStop: () => processes.get(agentId)?.isAlive === true,
 							footer: () => loadFooter(agentId, branch),
 							stop: () => stopFromView(agentId),

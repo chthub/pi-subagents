@@ -68,7 +68,9 @@ function rail(view: AgentView, width = 120) {
 
 function setup(
 	loadMessages: () => Promise<unknown[]> = async () => [],
-	extra: Partial<Pick<AgentViewDeps, "canStop" | "stop" | "footer" | "streamingSnapshot" | "renderers" | "entry">> = {},
+	extra: Partial<
+		Pick<AgentViewDeps, "canStop" | "stop" | "footer" | "streamingSnapshot" | "renderers" | "entry" | "send">
+	> = {},
 	tuiExtra: Record<string, unknown> = {},
 ) {
 	let listener: ((event: RpcEvent) => void) | undefined;
@@ -110,6 +112,40 @@ function setup(
 		text: () => view.render(120).join("\n"),
 	};
 }
+
+for (const [input, message, origin] of [
+	["\u7ee7\u7eed", "\u7ee7\u7eed", "user"],
+	["/continue", "Continue the assigned task and return the result.", "parent"],
+	["/continue   Retry after the account switch.", "Retry after the account switch.", "parent"],
+	["/continue-later", "/continue-later", "user"],
+	["Please explain /continue", "Please explain /continue", "user"],
+] as const) {
+	test(`view input ${JSON.stringify(input)} sends with ${origin} result ownership`, async (t) => {
+		const sent: [string, "parent" | "user"][] = [];
+		const { view, text } = setup(async () => [], {
+			send: async (message, origin) => {
+				sent.push([message, origin]);
+				return undefined;
+			},
+		});
+		t.after(() => view.dispose());
+		view.handleInput(input);
+		view.handleInput("\r");
+		await Promise.resolve();
+		assert.deepEqual(sent, [[message, origin]], "strip only the exact local command, never forward it to RPC");
+		if (origin === "parent") assert.match(text(), /Result will be reported to parent/);
+	});
+}
+
+test("a failed /continue delivery shows the error rather than promising a parent result", async (t) => {
+	const { view, text } = setup(async () => [], { send: async () => "Delivery failed." });
+	t.after(() => view.dispose());
+	view.handleInput("/continue");
+	view.handleInput("\r");
+	await Promise.resolve();
+	assert.match(text(), /Delivery failed/);
+	assert.doesNotMatch(text(), /Result will be reported/);
+});
 
 test("the conversation viewport has a right-hand scrollbar that follows scrolling", async (t) => {
 	const content = Array.from({ length: 100 }, (_, i) => `line ${i}`).join("\n");
@@ -515,7 +551,7 @@ test("pi's footer lines for the agent sit above the view's key line", async (t) 
 	assert.match(lines.at(-4) ?? "", /^\/work\/project \(main\)/);
 	assert.match(lines.at(-3) ?? "", /claude-sonnet-5-5 • high/);
 	assert.match(lines.at(-2) ?? "", /^web: on/);
-	assert.match(lines.at(-1) ?? "", /^\S.*Enter Send .*Esc Back/, "the key line starts in the footer's column");
+	assert.match(lines.at(-1) ?? "", /^\S.*Enter Side chat .*Esc Back/, "the key line starts in the footer's column");
 });
 
 test("opening mid-stream hydrates prior text and consumes real delta-only wire updates", async (t) => {

@@ -3,8 +3,8 @@
  *
  * Opened from the bottom agent list (click) or /agents. Shows the child's
  * transcript with pi's own message components, streams its live turn, and
- * has an editor: what you type goes to that agent (a side chat — its
- * answers are not reported to the main agent). Ctrl+X twice stops a live
+ * has an editor: ordinary messages are side chats; /continue resumes work
+ * with its result reported to the parent. Ctrl+X twice stops a live
  * agent. Esc returns to the main conversation. A finished agent is revived
  * from its session file by the first message you send. Dragging over the
  * text selects it with pi's own fullscreen selection (copied on release).
@@ -49,8 +49,8 @@ export interface AgentViewDeps {
 	streamingSnapshot?(): AssistantStreamSnapshot | undefined;
 	/** The conversation so far: from the live child, else from the session file. */
 	loadMessages(): Promise<unknown[]>;
-	/** Deliver a user message (reviving a finished agent). Resolves an error text, or undefined. */
-	send(text: string): Promise<string | undefined>;
+	/** Deliver a message, reviving if needed. Parent-owned turns report their result up. */
+	send(text: string, origin: "parent" | "user"): Promise<string | undefined>;
 	/** Whether a live process is up to stop (not a nested telemetry row). */
 	canStop?(): boolean;
 	/** Stop the agent's process. Resolves an error text, or undefined. */
@@ -444,19 +444,25 @@ export class AgentView implements Component, Focusable {
 		if (!text || this.sending) return;
 		this.editor.addToHistory(text);
 		this.editor.setText("");
+		const continuation = /^\/continue(?:\s|$)/.test(text);
+		const message = continuation
+			? text.slice("/continue".length).trim() || "Continue the assigned task and return the result."
+			: text;
 		const entry = this.deps.entry();
 		this.sending = true;
 		this.notice = entry && isTerminal(entry.status) ? "Reviving…" : "Sending…";
 		this.tui.requestRender();
-		const error = await this.deps.send(text);
+		const error = await this.deps.send(message, continuation ? "parent" : "user");
 		if (this.disposed) return;
 		this.sending = false;
 		const after = this.deps.entry();
 		this.notice = error
 			? error
-			: after?.status === "running" && entry?.status === "running"
-				? "Queued — delivered when the current turn ends"
-				: "";
+			: continuation
+				? "Result will be reported to parent"
+				: after?.status === "running" && entry?.status === "running"
+					? "Queued — delivered when the current turn ends"
+					: "";
 		this.scroll = 0;
 		this.attach();
 		this.tui.requestRender();
@@ -562,8 +568,8 @@ export class AgentView implements Component, Focusable {
 		const entry = this.deps.entry();
 		const finished = entry ? isTerminal(entry.status) : true;
 		const hint = finished ? "Finished — send a message to resume · " : "";
-		const keys = `Enter Send · ${this.deps.canStop?.() ? "Ctrl+X Stop · " : ""}PgUp/PgDn Scroll · Esc Back`;
+		const keys = `/continue Report to parent · Enter Side chat · ${this.deps.canStop?.() ? "Ctrl+X Stop · " : ""}PgUp/PgDn Scroll · Esc Back`;
 		const notice = this.notice ? `${this.notice} · ` : "";
-		return truncateToWidth(t.fg("dim", `${notice}${hint}${keys} · Replies stay in this conversation`), width, "…");
+		return truncateToWidth(t.fg("dim", `${notice}${hint}${keys}`), width, "…");
 	}
 }

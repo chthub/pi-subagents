@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { initTheme } from "@earendil-works/pi-coding-agent";
-import { agentTitle, atId, sendView, spawnFields, titleFrom } from "../views.js";
+import { stripTerminalSequences } from "@earendil-works/pi-tui";
+import { agentTitle, atId, sendView, spawnFields, spawnView, titleFrom } from "../views.js";
 
 initTheme("light");
 const theme = { bg: (_k: string, t: string) => t, fg: (_k: string, t: string) => t, bold: (t: string) => t } as never;
@@ -109,6 +110,46 @@ test("spawnFields: the call record shows each argument as written and what it re
 	assert.equal(byKey.tools.value, "bash, read");
 	assert.equal(byKey.prompt.value, "do it");
 	assert.ok(byKey.prompt.fold, "a long prompt folds when collapsed");
+});
+
+test("spawnFields: an empty tool allowlist is explicit and only agent_send is always kept", () => {
+	assert.deepEqual(
+		spawnFields({ tools: [] }, undefined).find((field) => field.key === "tools"),
+		{
+			key: "tools",
+			value: "[]",
+			note: "(agent_send always kept)",
+		},
+	);
+});
+
+test("spawn cards distinguish omitted, empty, and nonempty tool allowlists in every result state", () => {
+	for (const [args, expected] of [
+		[{}, /tools\s+all\s+\(default\)/],
+		[{ tools: [] }, /tools\s+\[\]\s+\(agent_send always kept\)/],
+		[{ tools: ["read", "bash"] }, /tools\s+read, bash/],
+	] as const) {
+		for (const isPartial of [false, true]) {
+			for (const expanded of [false, true]) {
+				const out = stripTerminalSequences(
+					spawnView
+						.renderResult(
+							{ content: [], details: { agentId: "nora", runInBackground: true } },
+							{ expanded, isPartial },
+							theme,
+							{ args, state: {}, isPartial, isError: false },
+						)
+						.render(100)
+						.join("\n"),
+				);
+				assert.match(out, expected);
+				if ("tools" in args) {
+					const toolsLine = out.split("\n").find((line) => /\btools\s/.test(line)) ?? "";
+					assert.doesNotMatch(toolsLine, /\ball\b|\(default\)/);
+				}
+			}
+		}
+	}
 });
 
 test("spawnFields: an explicit foreground call is not marked default; omitted tools read as all", () => {
