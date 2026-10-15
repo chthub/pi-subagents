@@ -553,6 +553,12 @@ export default function (pi: ExtensionAPI) {
 	const inbox = registerCompletionInbox(pi);
 	// Concurrent messages share one preflight, then each is delivered normally.
 	const revivals = new Map<string, Promise<string | undefined>>();
+	// A deliberate stop cancels a revival even while it is waiting for an old
+	// failed process to exit and no replacement has been registered yet.
+	const stopEpochs = new Map<string, number>();
+	const cancelRevival = (agentId: string) => stopEpochs.set(agentId, (stopEpochs.get(agentId) ?? 0) + 1);
+	const needsRecovery = (agent: AgentProcess) =>
+		!agent.isAlive || agent.status === "failed" || agent.status === "stopped";
 	let sessionGeneration = 0;
 	const completionSinks = new WeakMap<RegisteredAgent, (completion: AgentCompletion) => void>();
 	const bindCompletion = (agent: RegisteredAgent): void => {
@@ -1083,9 +1089,12 @@ export default function (pi: ExtensionAPI) {
 			// Honour the @ reference form we teach — strip once, use everywhere
 			// (lookup, stopAndRemove, details) so no @@ double prefix appears.
 			const agentId = params.agent_id.replace(/^@/, "");
-			const agent = registry.lookup(agentId);
+			const registered = registry.lookup(agentId);
+			const recovering = revivals.has(agentId);
+			const agent = registered ?? (recovering ? processes.get(agentId) : undefined);
+			const label = agent?.label ?? roster.get(agentId)?.label;
 
-			if (!agent) {
+			if (!agent && !recovering) {
 				// Card title needs the id: details.agentId drives titleFrom (the
 				// args key is snake_case agent_id, which titleFrom does not read).
 				const hint = targetsHint("Running or idle agents", registry.ids());
@@ -1096,14 +1105,21 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 
+			cancelRevival(agentId);
 			// Partial update first — drives the `⠋ agent_stop <label> stopping…`
 			// spinner line while the child is being stopped.
 			onUpdate?.({
-				content: [{ type: "text", text: `Stopping ${agent.label}\u2026` }],
-				details: { label: agent.label, agentId },
+				content: [{ type: "text", text: `Stopping ${label ?? agentId}\u2026` }],
+				details: { label, agentId },
 			});
 			try {
-				const stopped = await registry.stopAndRemove(agentId);
+				let stopped: boolean;
+				if (registered) stopped = await registry.stopAndRemove(agentId);
+				else {
+					await agent?.stop();
+					stopped = recovering;
+					if (stopped) roster.setStatus(agentId, "stopped");
+				}
 				if (stopped) tree.remove(agentId, "stopped");
 				if (!stopped) {
 					// Finished between lookup and removal (rare) — don't claim
@@ -1111,13 +1127,13 @@ export default function (pi: ExtensionAPI) {
 					const message = `agent ${params.agent_id} already finished.`;
 					return {
 						content: [{ type: "text", text: message }],
-						details: { agentId, label: agent.label, error: message },
+						details: { agentId, label, error: message },
 						isError: true,
 					};
 				}
 				return {
 					content: [{ type: "text", text: `Stopped agent @${agentId}.` }],
-					details: { agentId, label: agent.label },
+					details: { agentId, label },
 				};
 			} catch (err) {
 				// Child died mid-stop (e.g. write-after-end): surface it as a
@@ -1125,7 +1141,7 @@ export default function (pi: ExtensionAPI) {
 				const message = err instanceof Error ? err.message : String(err);
 				return {
 					content: [{ type: "text", text: message }],
-					details: { agentId, label: agent.label, error: message },
+					details: { agentId, label, error: message },
 					isError: true,
 				};
 			}
@@ -1313,8 +1329,30 @@ export default function (pi: ExtensionAPI) {
 		origin: "parent" | "user",
 	): Promise<string | undefined> => {
 		const entry = roster.get(agentId);
-		if (!entry?.sessionPath) return "This agent has no session file to resume.";
+		if (!entry?.sessionPath || entry.indent !== 0) return "This agent has no direct-child session to resume.";
 		const owner = sessionGeneration;
+		const stopEpoch = stopEpochs.get(agentId) ?? 0;
+		const cancelled = () => owner !== sessionGeneration || stopEpoch !== (stopEpochs.get(agentId) ?? 0);
+		const previous = processes.get(agentId);
+		if (previous) {
+			if (!needsRecovery(previous)) return "Agent is still active; recovery was not started.";
+			const result = previous.status === "failed" ? "failed" : "stopped";
+			// A failed process may stay alive while result reads/cleanup are pending.
+			// Release only THIS instance, but keep it in processes until stop finishes
+			// so session shutdown still owns it. Never run two writers on one session.
+			registry.removeExited(previous, result);
+			tree.remove(agentId, result);
+			roster.setStatus(agentId, result);
+			try {
+				await previous.stop();
+			} catch {
+				return "Could not stop the previous agent process; no replacement was started.";
+			}
+			if (cancelled()) return "Agent recovery was cancelled while stopping the previous process.";
+			if (previous.isAlive) return "Previous agent process has not exited; no replacement was started.";
+			if (processes.get(agentId) === previous) processes.delete(agentId);
+		}
+		if (cancelled()) return "Agent recovery was cancelled.";
 		const subtree = createSubtreeDisplay({
 			childId: agentId,
 			hasParent: HAS_PARENT,
@@ -1358,9 +1396,10 @@ export default function (pi: ExtensionAPI) {
 		bindCompletion(agent);
 		processes.set(agentId, agent);
 		const started = await agent.spawnAndSend(text, origin);
-		if (!started.ok || owner !== sessionGeneration || agent.stoppedByControl || !agent.isAlive) {
-			if (processes.get(agentId) === agent) processes.delete(agentId);
+		if (!started.ok || cancelled() || agent.stoppedByControl || !agent.isAlive) {
+			// Keep shutdown ownership during failed-preflight cleanup too.
 			await agent.stop().catch(() => {});
+			if (!agent.isAlive && processes.get(agentId) === agent) processes.delete(agentId);
 			return !started.ok ? started.error : "Agent was stopped while resuming.";
 		}
 		registry.register(agent, "running");
@@ -1387,13 +1426,16 @@ export default function (pi: ExtensionAPI) {
 		origin: "parent" | "user",
 	): Promise<string | undefined> => {
 		const owner = sessionGeneration;
+		const stopEpoch = stopEpochs.get(agentId) ?? 0;
 		const pending = revivals.get(agentId);
 		if (pending) {
 			return pending.then(async (error) => {
 				if (error) return error;
 				if (owner !== sessionGeneration) return "Session ended while resuming the agent.";
+				if (stopEpoch !== (stopEpochs.get(agentId) ?? 0)) return "Agent recovery was cancelled.";
 				const agent = processes.get(agentId);
 				if (!agent?.isAlive) return "Agent stopped before the message could be delivered.";
+				if (needsRecovery(agent)) return "Agent failed or stopped before the queued message could be delivered.";
 				const ok = await agent.sendMessage(text, origin);
 				if (ok) roster.setStatus(agentId, agent.status === "running" ? "running" : "idle");
 				return ok ? undefined : "Delivery failed.";
@@ -1407,10 +1449,12 @@ export default function (pi: ExtensionAPI) {
 		return shared;
 	};
 
-	/** A direct child whose process is gone but whose session can be resumed. */
+	/** Gone OR terminal-but-still-alive direct children resume on a new explicit message. */
 	const isRevivable = (agentId: string): boolean => {
 		const entry = roster.get(agentId);
-		return !!entry?.sessionPath && entry.indent === 0 && !registry.lookup(agentId) && !processes.get(agentId)?.isAlive;
+		if (!entry?.sessionPath || entry.indent !== 0) return false;
+		const live = processes.get(agentId);
+		return live ? needsRecovery(live) : !registry.lookup(agentId);
 	};
 
 	/** agent_send targets: live and resumable direct children in spawn order, then @parent. */
@@ -1427,7 +1471,7 @@ export default function (pi: ExtensionAPI) {
 	/** Deliver a message typed in the agent view. */
 	const sendFromView = async (agentId: string, text: string, cwd: string): Promise<string | undefined> => {
 		const live = processes.get(agentId);
-		if (revivals.has(agentId) || !live?.isAlive) return revive(agentId, text, cwd, "user");
+		if (revivals.has(agentId) || !live || needsRecovery(live)) return revive(agentId, text, cwd, "user");
 		const wasIdle = roster.get(agentId)?.status === "idle";
 		const ok = await live.sendMessage(text, "user");
 		if (!ok) return "Delivery failed.";
@@ -1442,8 +1486,9 @@ export default function (pi: ExtensionAPI) {
 	 * the turn is told; an idle agent owes nothing and stops silently.
 	 */
 	const stopFromView = async (agentId: string): Promise<string | undefined> => {
+		cancelRevival(agentId);
 		const agent = processes.get(agentId);
-		if (!agent?.isAlive) return "Not running.";
+		if (!agent?.isAlive) return revivals.has(agentId) ? undefined : "Not running.";
 		agent.stoppedByUser = true;
 		if (!registry.lookup(agentId)) {
 			// Foreground: its agent_spawn call is waiting and returns the stop.
