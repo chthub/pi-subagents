@@ -112,6 +112,7 @@ class FakeClient {
 			toolCall?: { id?: unknown; name?: unknown; arguments?: unknown };
 		};
 		messages?: Array<{ role?: string; stopReason?: string; errorMessage?: unknown; content?: unknown[] }>;
+		willRetry?: boolean;
 		message?: {
 			role?: string;
 			content?: Array<{
@@ -393,6 +394,74 @@ describe("AgentProcess — agent API errors", () => {
 		const completion = await completionPromise;
 		assert.equal(completion.status, "failed");
 		assert.equal(completion.output, "429 Rate limited");
+	});
+
+	for (const persistent of [false, true]) {
+		it(`clears a recovered overflow error before settlement (persistent=${persistent})`, async () => {
+			const outcomes: string[] = [];
+			const { agent, fake } = makeAgent({ cwd: "/tmp", persistent, onIdle: (o) => outcomes.push(o) });
+			await agent.spawnAndSend("do it");
+			if (persistent) {
+				const initial = agent.waitForCompletion();
+				fake.emitSettled();
+				await initial;
+				await agent.sendMessage("continue");
+			}
+			const completionId = agent.completionId;
+			fake.emitEvent({
+				type: "agent_end",
+				willRetry: false, // overflow recovery is not covered by the transient retry flag
+				messages: [{ role: "assistant", stopReason: "error", errorMessage: "Context window exceeded" }],
+			});
+			assert.equal(agent.status, "running");
+			fake.emitEvent({ type: "compaction_start" });
+			fake.emitEvent({ type: "compaction_end", willRetry: true });
+			fake.emitEvent({ type: "agent_start" });
+			fake.emitEvent({
+				type: "agent_end",
+				messages: [{ role: "assistant", stopReason: "stop" }],
+			});
+			assert.deepEqual(outcomes, [], "no completion until Pi settles");
+			fake.emitSettled();
+			const completion = await agent.completionSnapshot();
+			assert.equal(completion.status, "completed");
+			assert.equal(completion.output, "final answer");
+			assert.equal(completion.completionId, completionId, "recovery is still the same parent-owned turn");
+			assert.equal(agent.errorText, "");
+			assert.deepEqual(outcomes, persistent ? ["completed"] : []);
+		});
+	}
+
+	it("keeps an unrecovered overflow error when compaction never produces a successful run", async () => {
+		const { agent, fake } = makeAgent({ cwd: "/tmp" });
+		await agent.spawnAndSend("do it");
+		fake.lastText = "";
+		fake.emitEvent({
+			type: "agent_end",
+			willRetry: false,
+			messages: [{ role: "assistant", stopReason: "error", errorMessage: "Context window exceeded" }],
+		});
+		fake.emitEvent({ type: "compaction_end", willRetry: false });
+		fake.emitSettled();
+		const completion = await agent.waitForCompletion();
+		assert.equal(completion.status, "failed");
+		assert.equal(completion.output, "Context window exceeded");
+	});
+
+	it("reports the final error even after an earlier successful run", async () => {
+		const { agent, fake } = makeAgent({ cwd: "/tmp" });
+		await agent.spawnAndSend("do it");
+		fake.lastText = "";
+		fake.emitEvent({ type: "agent_end", messages: [{ role: "assistant", stopReason: "stop" }] });
+		fake.emitEvent({ type: "agent_start" });
+		fake.emitEvent({
+			type: "agent_end",
+			messages: [{ role: "assistant", stopReason: "error", errorMessage: "Final API error" }],
+		});
+		fake.emitSettled();
+		const completion = await agent.waitForCompletion();
+		assert.equal(completion.status, "failed");
+		assert.equal(completion.output, "Final API error");
 	});
 
 	it("stays completed when agent_end has no error stop reason", async () => {

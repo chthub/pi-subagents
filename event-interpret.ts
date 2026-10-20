@@ -41,6 +41,7 @@ export type AgentEvent =
 	| { type: "tool_call"; activity: Extract<AgentActivity, { kind: "tool" }> }
 	| { type: "text_delta"; delta: string }
 	| { type: "agent_failed"; error: string }
+	| { type: "agent_succeeded" }
 	| { type: "agent_msg"; message: AgentMessage }
 	| { type: "agent_tree"; event: AgentTreeEvent }
 	/** One of the child's own extension statuses (ctx.ui.setStatus); no text = cleared. */
@@ -196,17 +197,17 @@ export function interpretEvent(raw: RpcEvent): AgentEvent[] {
 	}
 
 	if (raw.type === "agent_end") {
-		// pi marks an agent_end with `willRetry: true` when it will transparently
-		// retry the turn (e.g. transient API errors). That first error is not a
-		// failure — the final agent_end decides. Without this gate the stale
-		// error would land in agentError, which has no reset path, and a
-		// retried-and-successful sub-agent would report failed.
+		// willRetry covers transient API retries, not all continuations (notably
+		// context-overflow compaction). Each non-retrying run replaces the prior
+		// outcome; only agent_settled makes it terminal. A successful recovery
+		// must explicitly clear an earlier run's error.
 		if (raw.willRetry === true) return [];
 		const messages = raw.messages as Array<{ role?: string; stopReason?: string; errorMessage?: unknown }> | undefined;
 		if (Array.isArray(messages)) {
 			for (let i = messages.length - 1; i >= 0; i--) {
 				const m = messages[i];
-				if (m?.role === "assistant" && m.stopReason === "error") {
+				if (m?.role !== "assistant") continue;
+				if (m.stopReason === "error") {
 					return [
 						{
 							type: "agent_failed",
@@ -214,6 +215,7 @@ export function interpretEvent(raw: RpcEvent): AgentEvent[] {
 						},
 					];
 				}
+				return [{ type: "agent_succeeded" }];
 			}
 		}
 		return [];

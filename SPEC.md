@@ -224,6 +224,7 @@ queued → running ──→ completed (notify)
 
 - Readiness is established by a prompt preflight that starts or queues a model run. A successful response with `disposition: "handled"` is not a running turn; an initial handled prompt returns a tool error instead of waiting for a settlement that will not happen.
 - Settlement snapshots freeze each turn's identity, ownership, status, output, and timing before asynchronous reporting. An older completion may be delivered after another turn starts, but it cannot idle or stop that newer turn.
+- Only `agent_settled` finalizes a turn. A later successful low-level run clears an earlier API error, including context-overflow errors recovered by compaction (which need not set `agent_end.willRetry`). An unrecovered error remains failed; process exits and explicit stops retain their own terminal policy.
 - Root children are persistent by default; children spawned inside a sub-agent are not. Callers may override this. Residency lasts only for the host session. Background spawning is root-only.
 - Idle means a resident RPC process without an active model turn. Notifications and widget rows identify it as idle; it remains addressable until stopped or host exit.
 - Stop closes stdin for orderly shutdown and marks the running turn `stoppedByControl` to suppress a new completion notification. Running and idle processes both wait for exit, with process-group SIGTERM and then SIGKILL fallbacks for shutdown that does not finish.

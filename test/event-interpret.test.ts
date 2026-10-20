@@ -141,18 +141,38 @@ describe("interpretEvent — agent_end", () => {
 		assert.deepEqual(interpretEvent(raw), [{ type: "agent_failed", error: "Agent model API error" }]);
 	});
 
-	it("ignores agent_end without an error stop reason", () => {
+	it("reports success for agent_end without an error stop reason", () => {
 		const raw = {
 			type: "agent_end",
-			messages: [{ role: "assistant", content: [], stopReason: "completed" }],
+			messages: [{ role: "assistant", content: [], stopReason: "stop" }],
 		};
-		assert.deepEqual(interpretEvent(raw), []);
+		assert.deepEqual(interpretEvent(raw), [{ type: "agent_succeeded" }]);
+	});
+
+	it("uses only the last assistant outcome, ignoring older recovered errors", () => {
+		assert.deepEqual(
+			expect({
+				type: "agent_end",
+				messages: [
+					{ role: "assistant", stopReason: "error", errorMessage: "old error" },
+					{ role: "assistant", stopReason: "stop" },
+					{ role: "toolResult" },
+				],
+			}),
+			[{ type: "agent_succeeded" }],
+		);
+	});
+
+	it("does not invent an outcome when agent_end has no assistant message", () => {
+		for (const messages of [undefined, [], [{ role: "user" }]]) {
+			assert.deepEqual(expect({ type: "agent_end", messages }), []);
+		}
 	});
 
 	it("ignores agent_end that pi will transparently retry (willRetry)", () => {
 		// The first agent_end of a retried turn carries the error AND willRetry:
 		// true — it is not a failure, the final agent_end decides. Skipping it
-		// keeps the stale error out of agentError (which has no reset path).
+		// avoids recording an error while Pi is still retrying.
 		const raw = {
 			type: "agent_end",
 			willRetry: true,

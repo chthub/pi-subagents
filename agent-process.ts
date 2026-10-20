@@ -645,6 +645,9 @@ export class AgentProcess {
 				case "agent_failed":
 					this.agentError = ev.error;
 					break;
+				case "agent_succeeded":
+					this.agentError = null;
+					break;
 				case "agent_msg":
 					this.onMessage?.(ev.message);
 					break;
