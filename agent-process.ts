@@ -147,9 +147,12 @@ export class AgentProcess {
 	private settleCount = 0;
 	private readonly processId = randomUUID();
 
-	private readonly initialTurn: { sequence: number; completion?: Promise<AgentCompletion>; output?: string } = {
-		sequence: 1,
-	};
+	private readonly initialTurn: {
+		sequence: number;
+		completion?: Promise<AgentCompletion>;
+		output?: string;
+		replies: string[];
+	} = { sequence: 1, replies: [] };
 	private turn = this.initialTurn;
 	private stopPromise: Promise<void> | undefined;
 	private streaming: AssistantStream | undefined;
@@ -547,7 +550,10 @@ export class AgentProcess {
 				: this.client.isClosed
 					? `pi exited before settling (code ${this.client.exitCode})`
 					: "");
-		const finalText = turn.output;
+		// A queued prompt can produce another finished reply before Pi settles.
+		// Freeze all successful replies in order, not only the last message.
+		const finalText = turn.replies.length ? turn.replies.join("\n\n---\n\n") : turn.output;
+		const failureSuffix = turn.replies.length && status === "failed" ? error : "";
 		// Queue BOTH reads now, before publishing idle or invoking a callback.
 		// Later prompt writes cannot overtake these synchronous RPC requests.
 		const outputRead = finalText === undefined ? this.lastOutput() : Promise.resolve(finalText);
@@ -555,7 +561,11 @@ export class AgentProcess {
 		turn.completion = Promise.all([outputRead, statsRead, this.sessionInfoReady]).then(([output, stats]) => ({
 			completionId,
 			status,
-			output: status === "failed" && !output.trim() ? error : output,
+			output: failureSuffix
+				? `${output}\n\n---\n\n${failureSuffix}`
+				: status === "failed" && !output.trim()
+					? error
+					: output,
 			stats: { tokens: stats?.tokens ?? 0, toolUses: stats?.toolUses ?? 0, durationMs },
 			sessionPath: this.sessionPath,
 			sessionId: this.sessionId,
@@ -572,13 +582,24 @@ export class AgentProcess {
 			this.streaming?.apply(event.assistantMessageEvent);
 		}
 		if (event.type === "message_end") {
-			const message = event.message as { role?: string; content?: Array<{ type?: string; text?: string }> } | undefined;
+			const message = event.message as
+				| { role?: string; stopReason?: string; content?: Array<{ type?: string; text?: string }> }
+				| undefined;
 			if (message?.role === "assistant" && Array.isArray(message.content)) {
 				this.streaming = undefined;
 				this.turn.output = message.content
 					.filter((block) => block.type === "text")
 					.map((block) => block.text ?? "")
 					.join("");
+				// Only finished direct replies are deliverables. Do not accumulate
+				// tool commentary, reasoning, truncated output, or failed attempts.
+				if (
+					message.stopReason === "stop" &&
+					!message.content.some((block) => block.type === "toolCall") &&
+					this.turn.output.trim()
+				) {
+					this.turn.replies.push(this.turn.output);
+				}
 			}
 		}
 		// Raw protocol shapes are interpreted in event-interpret.ts — the only
@@ -669,7 +690,7 @@ export class AgentProcess {
 	}
 
 	private startWake(owedToParent: boolean): void {
-		this.turn = { sequence: this.turn.sequence + 1 };
+		this.turn = { sequence: this.turn.sequence + 1, replies: [] };
 		this.agentError = null;
 		this.status = "running";
 		this.parentWaiting = owedToParent;

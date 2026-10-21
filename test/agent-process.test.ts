@@ -115,6 +115,7 @@ class FakeClient {
 		willRetry?: boolean;
 		message?: {
 			role?: string;
+			stopReason?: string;
 			content?: Array<{
 				type?: string;
 				text?: unknown;
@@ -1051,6 +1052,115 @@ describe("AgentProcess — wake turns", () => {
 		assert.equal(agent.stoppedByControl, false);
 		assert.equal(fake.endInputCalls, 1);
 		assert.deepEqual(outcomes, []);
+	});
+});
+
+describe("AgentProcess — replies within one settlement", () => {
+	function reply(fake: FakeClient, text: string, stopReason = "stop"): void {
+		fake.emitEvent({
+			type: "message_end",
+			message: { role: "assistant", stopReason, content: [{ type: "text", text }] },
+		});
+	}
+
+	for (const phase of ["spawn", "wake"] as const) {
+		it(`preserves both reports when a queued prompt continues the ${phase} before settlement`, async () => {
+			const outcomes: string[] = [];
+			const { agent, fake } = makeAgent({ cwd: "/tmp", persistent: true, onIdle: (o) => outcomes.push(o) });
+			await agent.spawnAndSend("initial task");
+			if (phase === "wake") {
+				reply(fake, "previous turn");
+				fake.emitSettled();
+				await agent.waitForCompletion();
+				await agent.sendMessage("next task");
+			}
+			const id = agent.completionId;
+			fake.promptDisposition = "queued";
+			await agent.sendMessage("wrap up; do not repeat the statistics");
+			reply(fake, "first full report");
+			assert.equal(agent.status, "running", "a finished report is not an idle transition");
+			await assert.rejects(agent.completionSnapshot(), /not settled/);
+			fake.emitEvent({ type: "message_end", message: { role: "user", content: [{ type: "text", text: "wrap up" }] } });
+			reply(fake, "second supplementary report");
+			fake.lastText = "newer inspection text must not replace either report";
+			fake.emitSettled();
+			const completion = await agent.completionSnapshot();
+			assert.equal(completion.completionId, id, "one settlement still produces one completion");
+			assert.equal(completion.output, "first full report\n\n---\n\nsecond supplementary report");
+			assert.equal(completion.owedToParent, true);
+			assert.deepEqual(outcomes, phase === "wake" ? ["completed"] : []);
+			if (phase === "spawn") assert.strictEqual(await agent.waitForCompletion(), completion);
+			await agent.sendMessage("fresh task");
+			reply(fake, "fresh report");
+			fake.emitSettled();
+			assert.equal((await agent.completionSnapshot()).output, "fresh report", "no reports leak into the next wake");
+			assert.equal(
+				completion.output,
+				"first full report\n\n---\n\nsecond supplementary report",
+				"snapshot stays frozen",
+			);
+		});
+	}
+
+	it("keeps identical reports from different responses, but excludes tool commentary and thinking", async () => {
+		const { agent, fake } = makeAgent({ cwd: "/tmp" });
+		await agent.spawnAndSend("task");
+		fake.emitEvent({
+			type: "message_end",
+			message: {
+				role: "assistant",
+				stopReason: "toolUse",
+				content: [
+					{ type: "text", text: "working" },
+					{ type: "toolCall", name: "read" },
+				],
+			},
+		});
+		reply(fake, "same report");
+		fake.emitEvent({
+			type: "message_end",
+			message: {
+				role: "assistant",
+				stopReason: "stop",
+				content: [{ type: "thinking", thinking: "private reasoning" }],
+			},
+		});
+		reply(fake, "same report");
+		reply(fake, "later partial error", "error");
+		fake.emitEvent({ type: "agent_end", willRetry: true });
+		reply(fake, "recovered report");
+		fake.emitSettled();
+		assert.equal(
+			(await agent.waitForCompletion()).output,
+			"same report\n\n---\n\nsame report\n\n---\n\nrecovered report",
+		);
+	});
+
+	it("preserves completed reports and exposes a later unrecovered failure", async () => {
+		const { agent, fake } = makeAgent({ cwd: "/tmp" });
+		await agent.spawnAndSend("task");
+		reply(fake, "completed report");
+		reply(fake, "", "error");
+		fake.emitEvent({
+			type: "agent_end",
+			messages: [{ role: "assistant", stopReason: "error", errorMessage: "API failed" }],
+		});
+		fake.emitSettled();
+		const completion = await agent.waitForCompletion();
+		assert.equal(completion.status, "failed");
+		assert.equal(completion.output, "completed report\n\n---\n\nAPI failed");
+	});
+
+	it("does not claim parent ownership of multiple user-only replies", async () => {
+		const { agent, fake } = makeAgent({ cwd: "/tmp", persistent: true });
+		await agent.spawnAndSend("private side chat", "user");
+		reply(fake, "private first report");
+		await agent.sendMessage("private supplement", "user");
+		reply(fake, "private second report");
+		fake.emitSettled();
+		const completion = await agent.waitForCompletion();
+		assert.equal(completion.output, "private first report\n\n---\n\nprivate second report");
+		assert.equal(completion.owedToParent, false, "the caller must not route this completion to the parent");
 	});
 });
 

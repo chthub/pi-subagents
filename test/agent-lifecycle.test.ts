@@ -3,6 +3,7 @@ import path from "node:path";
 import { it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { type AgentCompletion, AgentProcess } from "../agent-process.js";
+import { completionNotification } from "../notification.js";
 import { AgentRegistry } from "../registry.js";
 import { RpcClient } from "../rpc-client.js";
 
@@ -91,6 +92,43 @@ it("delivers an internal background-result wake without another parent prompt", 
 		assert.notEqual(notifications[0].completionId, notifications[1].completionId);
 		assert.equal(registry.lookup(agent.agentId), agent);
 		assert.equal(agent.status, "completed");
+	} finally {
+		await agent.stop();
+	}
+});
+
+it("returns both queued-prompt reports in one notification over the RPC transport", { timeout: 5000 }, async () => {
+	const notices: ReturnType<typeof completionNotification>[] = [];
+	const registry = new AgentRegistry({
+		notify: (agent, completion) => {
+			notices.push(completionNotification(agent, completion));
+		},
+	});
+	const agent = new AgentProcess(
+		{ cwd: path.dirname(fixture), agentId: "queued", label: "queued reports", persistent: true },
+		{ createClient: (options) => new RpcClient({ ...options, command: process.execPath, args: [fixture] }) },
+	);
+	try {
+		await agent.spawnAndSend("/queue-reports");
+		registry.register(agent);
+		const id = agent.completionId;
+		assert.equal(agent.status, "running");
+		assert.equal(await registry.deliver(agent.agentId, "wrap up"), true);
+		const completion = await agent.waitForCompletion();
+		await registry.complete(agent, completion);
+		assert.equal(completion.completionId, id);
+		assert.equal(completion.status, "completed");
+		assert.equal(completion.owedToParent, true);
+		assert.equal(notices.length, 1);
+		const expected = "first full report\n\n---\n\nsecond supplementary report";
+		assert.equal(
+			JSON.parse(notices[0].content as string).result,
+			expected,
+			"the parent receives both reports, not tool commentary",
+		);
+		assert.equal(notices[0].details.result, expected, "the display card agrees with model context");
+		assert.equal(agent.status, "completed");
+		assert.equal(registry.lookup(agent.agentId), agent);
 	} finally {
 		await agent.stop();
 	}

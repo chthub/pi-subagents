@@ -5,6 +5,7 @@ import readline from "node:readline";
 const input = readline.createInterface({ input: process.stdin });
 let turns = 0;
 let output = "";
+let queued = false;
 const write = (record) => process.stdout.write(`${JSON.stringify(record)}\n`);
 input.on("line", (line) => {
 	const command = JSON.parse(line);
@@ -12,6 +13,37 @@ input.on("line", (line) => {
 	if (command.type === "prompt") {
 		if (command.message === "/handled") {
 			write({ ...response, data: { disposition: "handled" } });
+			return;
+		}
+		if (command.message === "/queue-reports") {
+			queued = true;
+			write({ ...response, data: { disposition: "started" } });
+			write({ type: "agent_start" });
+			return;
+		}
+		if (queued) {
+			queued = false;
+			write({ ...response, data: { disposition: "queued" } });
+			write({
+				type: "message_end",
+				message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "first full report" }] },
+			});
+			write({ type: "turn_end" });
+			write({ type: "message_end", message: { role: "user", content: command.message } });
+			write({
+				type: "message_end",
+				message: {
+					role: "assistant", stopReason: "toolUse",
+					content: [{ type: "text", text: "checking supplementary evidence" }, { type: "toolCall", name: "read" }],
+				},
+			});
+			output = "second supplementary report";
+			write({
+				type: "message_end",
+				message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: output }] },
+			});
+			write({ type: "agent_end", messages: [], willRetry: false });
+			write({ type: "agent_settled", aborted: false });
 			return;
 		}
 		output = `answer ${++turns}`;
