@@ -8,36 +8,22 @@
  * components, which wrap); a structRow is one physical line that always fits.
  */
 
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { sliceByColumn, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 /** Collapse whitespace and cut long tails to `max` columns (ellipsis prefix). */
 export function clipTail(s: string, max = 60): string {
+	if (max <= 0) return "";
 	const clean = s.replace(/\s+/g, " ").trim();
-	if (visibleWidth(clean) <= max) return clean;
-	const chars = [...clean];
-	let w = 0;
-	let tail = "";
-	for (let i = chars.length - 1; i >= 0; i--) {
-		const cw = visibleWidth(chars[i]);
-		if (w + cw > max - 1) break;
-		tail = chars[i] + tail;
-		w += cw;
-	}
-	return `\u2026${tail}`;
+	const width = visibleWidth(clean);
+	if (width <= max) return clean;
+	return `\u2026${sliceByColumn(clean, width - (max - 1), max - 1, true)}`;
 }
 
 /** Cut plain text to `max` columns keeping the head, trailing ellipsis. */
 export function capPlain(s: string, max: number): string {
+	if (max <= 0) return "";
 	if (visibleWidth(s) <= max) return s;
-	let w = 0;
-	let head = "";
-	for (const ch of s) {
-		const cw = visibleWidth(ch);
-		if (w + cw > max - 1) break;
-		head += ch;
-		w += cw;
-	}
-	return `${head}\u2026`;
+	return `${sliceByColumn(s, 0, max - 1, true)}\u2026`;
 }
 
 /**
@@ -61,10 +47,12 @@ export function safeTitle(title: string | undefined, max?: number): string {
  *
  *   [prefix] content [suffix]
  *
- * - `prefix` fixes the alignment (styled OK; visibleWidth skips ANSI).
+ * - `prefix` fixes the alignment (styled OK; visibleWidth skips ANSI), clipped
+ *   without an ellipsis if the structural text alone exceeds the budget.
  * - `content` is plain text — flattened and capped to exactly what's left,
  *   zero safety margin (same metric as pi's crash check).
- * - `suffix` is right-side text that must stay visible (live meta), styled OK.
+ * - `suffix` is right-side text (live meta), styled OK. It takes priority over
+ *   the prefix/content, but is itself capped when wider than the whole row.
  *
  * Which end of over-long content to sacrifice is the caller's call:
  * "head" (default) keeps the beginning (titles); "tail" keeps the latest
@@ -78,8 +66,11 @@ export function structRow(opts: {
 	keep?: "head" | "tail";
 	styleContent?: (capped: string) => string;
 }): string {
+	if (opts.width <= 0) return "";
 	const flat = opts.content.replace(/[\r\n\t]+/g, " ").trim();
-	const avail = Math.max(0, opts.width - visibleWidth(opts.prefix) - visibleWidth(opts.suffix ?? ""));
+	const suffix = capPlain(opts.suffix ?? "", opts.width);
+	const prefix = truncateToWidth(opts.prefix, opts.width - visibleWidth(suffix), "");
+	const avail = Math.max(0, opts.width - visibleWidth(prefix) - visibleWidth(suffix));
 	const capped = opts.keep === "tail" ? clipTail(flat, avail) : capPlain(flat, avail);
-	return `${opts.prefix}${opts.styleContent ? opts.styleContent(capped) : capped}${opts.suffix ?? ""}`;
+	return truncateToWidth(`${prefix}${opts.styleContent ? opts.styleContent(capped) : capped}${suffix}`, opts.width, "");
 }

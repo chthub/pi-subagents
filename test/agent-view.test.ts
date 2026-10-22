@@ -2,7 +2,15 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { initTheme, SessionManager, type ToolRenderers } from "@earendil-works/pi-coding-agent";
-import { stripTerminalSequences, type TuiMouseEvent, visibleWidth } from "@earendil-works/pi-tui";
+import {
+	CURSOR_MARKER,
+	KeybindingsManager,
+	stripTerminalSequences,
+	Text,
+	TUI_KEYBINDINGS,
+	type TuiMouseEvent,
+	visibleWidth,
+} from "@earendil-works/pi-tui";
 import { AgentView, type AgentViewDeps } from "../agent-view.js";
 import { AssistantStream } from "../assistant-stream.js";
 import type { RpcEvent } from "../protocol.js";
@@ -72,13 +80,14 @@ function setup(
 		Pick<AgentViewDeps, "canStop" | "stop" | "footer" | "streamingSnapshot" | "renderers" | "entry" | "send">
 	> = {},
 	tuiExtra: Record<string, unknown> = {},
+	keybindings = new KeybindingsManager(TUI_KEYBINDINGS),
 ) {
 	let listener: ((event: RpcEvent) => void) | undefined;
 	const terminal = { rows: 40 };
 	const view = new AgentView(
 		{ terminal, requestRender() {}, ...tuiExtra } as never,
 		{ fg: (_color: string, text: string) => text, bold: (text: string) => text } as never,
-		{ matches: () => false } as never,
+		keybindings as never,
 		{
 			agentId: "test",
 			cwd: process.cwd(),
@@ -167,6 +176,167 @@ test("the conversation viewport has a right-hand scrollbar that follows scrollin
 	assert.notDeepEqual(top, bottom);
 	for (const width of [1, 10, 30, 120]) {
 		assert.ok(view.render(width).every((line) => visibleWidth(line) <= width));
+	}
+});
+
+test("same-width renders observe a tool renderer's own invalidation", async (t) => {
+	let version = 1;
+	let invalidate: (() => void) | undefined;
+	let redraws = 0;
+	const pending = message([{ type: "toolCall", id: "call", name: "custom", arguments: {} }], "toolUse");
+	const { view, text } = setup(
+		async () => [pending],
+		{
+			renderers: () => ({
+				renderCall: (_args, _theme, context) => {
+					invalidate = context.invalidate;
+					return new Text(`renderer version ${version}`, 0, 0);
+				},
+			}),
+		},
+		{ requestRender: () => redraws++ },
+	);
+	t.after(() => view.dispose());
+	await Promise.resolve();
+	assert.match(text(), /renderer version 1/);
+	assert.ok(invalidate);
+	const before = redraws;
+	version = 2;
+	invalidate();
+	assert.ok(redraws > before, "the native tool component requested a render");
+	assert.match(text(), /renderer version 2/);
+	assert.doesNotMatch(text(), /renderer version 1/);
+});
+
+test("streaming append and replay keep the reader's absolute top row", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	let history = [message([{ type: "text", text: "earlier conversation" }], "stop")];
+	const { view, emit, update } = setup(async () => history);
+	t.after(() => view.dispose());
+	await Promise.resolve();
+	const content = Array.from({ length: 100 }, (_, i) => `live row ${i}`).join("\n");
+	emit({ type: "message_start", message: message() });
+	update({ type: "text_delta", contentIndex: 0, delta: content });
+	rail(view);
+	view.handleInput("\x1b[5~");
+	const reading = rail(view).content;
+	assert.match(reading, /live row/);
+	const appended = `\n${Array.from({ length: 10 }, (_, i) => `new row ${i}`).join("\n")}`;
+	update({ type: "text_delta", contentIndex: 0, delta: appended });
+	assert.equal(rail(view).content, reading, "new stream rows do not move the reader");
+	const final = message([{ type: "text", text: content + appended }], "stop");
+	history = [...history, final];
+	emit({ type: "message_end", message: final });
+	t.mock.timers.tick(60);
+	await Promise.resolve();
+	await Promise.resolve();
+	await Promise.resolve();
+	assert.equal(rail(view).content, reading, "replay replaces the stream without moving the reader");
+	emit({ type: "message_start", message: message() });
+	update({ type: "text_delta", contentIndex: 0, delta: "next turn\n".repeat(20) });
+	assert.equal(rail(view).content, reading, "reading remains anchored during the next turn");
+});
+
+test("bottom following survives streaming-to-replay replacement", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	let history: AssistantMessage[] = [];
+	const { view, emit, update } = setup(async () => history);
+	t.after(() => view.dispose());
+	await Promise.resolve();
+	const content = Array.from({ length: 100 }, (_, i) => `follow row ${i}`).join("\n");
+	emit({ type: "message_start", message: message() });
+	update({ type: "text_delta", contentIndex: 0, delta: content });
+	assert.match(rail(view).content.trimEnd(), /follow row 99$/);
+	const final = message([{ type: "text", text: content }], "stop");
+	history = [final];
+	emit({ type: "message_end", message: final });
+	t.mock.timers.tick(60);
+	await Promise.resolve();
+	await Promise.resolve();
+	await Promise.resolve();
+	assert.match(rail(view).content.trimEnd(), /follow row 99$/);
+	emit({ type: "message_start", message: message() });
+	update({ type: "text_delta", contentIndex: 0, delta: "latest turn\n".repeat(40) });
+	const bottom = rail(view);
+	assert.match(bottom.content.trimEnd(), /latest turn$/);
+	assert.equal(bottom.thumbY + bottom.thumbHeight, bottom.y + bottom.height);
+});
+
+test("configured fullscreen scroll actions replace defaults and honor disabled bindings", async (t) => {
+	const bindings = new KeybindingsManager(TUI_KEYBINDINGS, {
+		"tui.altScreen.pageUp": "alt+k",
+		"tui.altScreen.pageDown": [],
+		"tui.altScreen.lineUp": "alt+u",
+		"tui.altScreen.lineDown": "alt+d",
+		"tui.altScreen.halfPageUp": "alt+h",
+		"tui.altScreen.halfPageDown": "alt+j",
+	});
+	const content = Array.from({ length: 100 }, (_, i) => `row ${i}`).join("\n");
+	const { view, text } = setup(async () => [message([{ type: "text", text: content }], "stop")], {}, {}, bindings);
+	t.after(() => view.dispose());
+	await Promise.resolve();
+	const bottom = rail(view).content;
+	view.handleInput("\x1b[5~");
+	assert.equal(rail(view).content, bottom, "old PgUp no longer scrolls the transcript");
+	view.handleInput("\x1bk");
+	const pageUp = rail(view).content;
+	assert.notEqual(pageUp, bottom);
+	view.handleInput("\x1b[6~");
+	assert.equal(rail(view).content, pageUp, "disabled PgDn cannot scroll");
+	assert.match(text(), /alt\+k Scroll/);
+	for (const [up, down] of [
+		["\x1bu", "\x1bd"],
+		["\x1bh", "\x1bj"],
+	]) {
+		view.handleInput(up);
+		assert.notEqual(rail(view).content, pageUp);
+		view.handleInput(down);
+		assert.equal(rail(view).content, pageUp);
+	}
+	view.handleInput("\x1b[1;5H"); // default Ctrl+Home
+	assert.match(rail(view).content.trimStart(), /^row 0/);
+	view.handleInput("\x1b[1;5F"); // default Ctrl+End
+	assert.equal(rail(view).content, bottom);
+	bindings.setUserBindings({ "tui.altScreen.pageUp": [], "tui.altScreen.pageDown": [] });
+	assert.doesNotMatch(text(), / Scroll/);
+});
+
+test("short terminals retain the focused editor cursor within the overlay height", async (t) => {
+	const sessionManager = SessionManager.inMemory("/work/project");
+	for (const withFooter of [false, true]) {
+		const { view, terminal } = setup(async () => [], {
+			footer: async () =>
+				withFooter
+					? {
+							sessionManager,
+							autoCompactionEnabled: true,
+							gitBranch: "main",
+							providerCount: 1,
+							isUsingSubscription: () => false,
+							statuses: () => new Map([["web", "web: on"]]),
+						}
+					: undefined,
+		});
+		t.after(() => view.dispose());
+		await Promise.resolve();
+		await Promise.resolve();
+		view.focused = true;
+		for (const input of ["", "line one\nline two\nline three\nline four\nline five\nline six\n"]) {
+			view.handleInput(`\x1b[200~${input}\x1b[201~`);
+			for (const rows of [1, 2, 3, 6, 8, 10, 12, 16]) {
+				terminal.rows = rows;
+				for (const width of [1, 2, 20, 160]) {
+					const lines = view.render(width);
+					assert.equal(lines.length, rows, `${rows} rows, width ${width}, footer ${withFooter}`);
+					assert.ok(lines.every((line) => visibleWidth(line) <= width));
+					assert.ok(
+						lines.some((line) => line.includes(CURSOR_MARKER)),
+						"focused cursor must not be clipped",
+					);
+					if (rows > 1 && width === 160) assert.match(stripTerminalSequences(lines.at(-1) ?? ""), /\/continue/);
+				}
+			}
+		}
 	}
 });
 

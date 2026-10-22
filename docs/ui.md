@@ -22,7 +22,8 @@ The primitives have two families: **views**, where a tool declares a data-to-car
 | `spinner.ts` | Spinner animation and `formatDuration`/`durationMeta`; width helpers are imported directly from `width.js` | All |
 | `ticker.ts` | Shared animation clock, using the smallest subscribed interval | `ticker`, `TickerHandle` |
 | `widget.ts` | Generic status primitives and shared types; `counterParts` supplies foreground subtree metadata. The product's conversation roster is rendered by root `widget.ts` | `StatusWidget`, `counterParts`, and related exports |
-| `card.ts` / `view.ts` | Card building blocks and the declarative `createToolView` factory | See each module |
+| `card.ts` / `view.ts` | Card building blocks and the declarative `createToolView` factory, including per-tool folding | See each module |
+| `mouse.ts` | Primary-button press/click handling compatible with Pi 1.4's gesture dispatch | `primaryClick` |
 | `preview-runtime.ts` | Development-only storybook runtime with theme-loading support and a simulated host shell; production code must not import it | `createPreviewRuntime` |
 
 There is no barrel index. Import each module directly to keep dependencies and responsibilities explicit.

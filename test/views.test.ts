@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { initTheme } from "@earendil-works/pi-coding-agent";
 import { stripTerminalSequences } from "@earendil-works/pi-tui";
-import { agentTitle, atId, sendView, spawnFields, spawnView, titleFrom } from "../views.js";
+import { agentTitle, atId, sendView, spawnFields, spawnView, stopView, titleFrom } from "../views.js";
 
 initTheme("light");
 const theme = { bg: (_k: string, t: string) => t, fg: (_k: string, t: string) => t, bold: (t: string) => t } as never;
@@ -45,6 +45,22 @@ test("failed sends to @parent never display success", () => {
 	]) {
 		assert.match(out, /agent_send.*@parent.*failed/);
 		assert.doesNotMatch(out, /\bsent\b|delivered/);
+	}
+});
+
+test("failed stops without a body retain the custom error card", () => {
+	for (const expanded of [false, true]) {
+		const out = stopView
+			.renderResult(
+				{ content: [], details: { agentId: "max", error: "Agent not found" } },
+				{ expanded, isPartial: false },
+				theme,
+				{ args: { agent_id: "max" }, state: {}, isPartial: false, isError: true },
+			)
+			.render(100)
+			.join("\n");
+		assert.match(out, /✗ agent_stop.*@max.*stop failed/);
+		assert.match(out, /Agent not found/);
 	}
 });
 

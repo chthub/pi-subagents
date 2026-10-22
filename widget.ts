@@ -12,11 +12,12 @@
  */
 
 import type { ExtensionUIContext, Theme } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { type TuiMouseEvent, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { AgentProcess } from "./agent-process.js";
 import type { AgentActivity } from "./event-interpret.js";
 import { isTerminal, type Roster, type RosterActivity, type RosterEntry, type RosterStatus } from "./roster.js";
 import { displayAgentId } from "./tree-display.js";
+import { primaryClick } from "./ui/mouse.js";
 import { formatElapsed, SPINNER_TICK_MS, Spinner } from "./ui/spinner.js";
 import { type TickerHandle, ticker } from "./ui/ticker.js";
 import type { WidgetResult, WidgetRow, WidgetStatus } from "./ui/widget.js";
@@ -27,8 +28,8 @@ const WIDGET_KEY = "pi-subagents-list";
 const MAX_LINES = 8;
 
 interface MouseEventLite {
-	type: string;
-	button: string;
+	type: TuiMouseEvent["type"];
+	button: TuiMouseEvent["button"];
 	y: number;
 	screenY?: number;
 }
@@ -43,6 +44,8 @@ export class AgentWidget {
 	private readonly spinner = new Spinner();
 	/** Rendered line index → agent id (click targets of the last render). */
 	private lineAgents: (string | undefined)[] = [];
+	/** Do not navigate to a replacement row if the roster changes mid-click. */
+	private pressedAgent: string | undefined;
 	private readonly unsubscribe: () => void;
 	/** Agent line under the pointer (fullscreen mode reports pointer motion). */
 	private hovered: string | undefined;
@@ -153,17 +156,26 @@ export class AgentWidget {
 		this.registered = true;
 	}
 
-	private handleMouse(event: MouseEventLite): { handled: boolean } | undefined {
+	private handleMouse(event: MouseEventLite): ReturnType<typeof primaryClick> {
 		const agentId = this.lineAgents[event.y];
 		if (event.screenY !== undefined) this.screenTop = event.screenY - event.y;
 		if (event.type === "move") {
 			this.setHovered(agentId);
 			return undefined; // motion stays available to the renderer
 		}
-		if (event.type !== "click" || event.button !== "left" || !agentId) return undefined;
-		this.setHovered(undefined);
-		this.onOpen(agentId);
-		return { handled: true };
+		if (event.button === "left") {
+			if (event.type === "press") this.pressedAgent = agentId;
+			if (event.type === "click") {
+				const pressed = this.pressedAgent;
+				this.pressedAgent = undefined;
+				if (pressed && pressed !== agentId) return { handled: true, render: false };
+			}
+		}
+		if (!agentId) return undefined;
+		return primaryClick(event, () => {
+			this.setHovered(undefined);
+			this.onOpen(agentId);
+		});
 	}
 
 	private setHovered(agentId: string | undefined): void {

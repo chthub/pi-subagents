@@ -15,6 +15,7 @@ import type { KeybindingsManager, Theme, ToolRenderers } from "@earendil-works/p
 import { AssistantMessageComponent, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import {
 	type Component,
+	CURSOR_MARKER,
 	Editor,
 	type EditorTheme,
 	type Focusable,
@@ -73,11 +74,11 @@ export class AgentView implements Component, Focusable {
 	private readonly spinner = new Spinner();
 	private transcript = new Transcript();
 	private disposed = false;
-	private transcriptCache: { width: number; lines: string[] } | undefined;
 	/** The live assistant turn, built from streamed deltas until message_end. */
 	private streaming: { stream: AssistantStream; component: AssistantMessageComponent; ended: boolean } | undefined;
-	/** Lines scrolled up from the bottom (0 = follow the end). */
-	private scroll = 0;
+	/** Absolute top row while reading; undefined follows the newest output. */
+	private scrollTop: number | undefined;
+	private maxScroll = 0;
 	private viewport = 10;
 	/** Geometry from the last render, in component-local terminal cells. */
 	private scrollbar:
@@ -156,7 +157,6 @@ export class AgentView implements Component, Focusable {
 	}
 
 	invalidate(): void {
-		this.transcriptCache = undefined;
 		this.transcript.invalidate();
 		this.streaming?.component.invalidate();
 		this.editor.invalidate();
@@ -182,13 +182,22 @@ export class AgentView implements Component, Focusable {
 			void this.reload();
 			return;
 		}
-		if (matchesKey(data, Key.pageUp)) {
-			this.scrollBy(Math.max(1, this.viewport - 2));
-			return;
-		}
-		if (matchesKey(data, Key.pageDown)) {
-			this.scrollBy(-Math.max(1, this.viewport - 2));
-			return;
+		const page = Math.max(1, this.viewport - 2);
+		const halfPage = Math.max(1, Math.floor(this.viewport / 2));
+		for (const [action, lines] of [
+			["tui.altScreen.pageUp", page],
+			["tui.altScreen.pageDown", -page],
+			["tui.altScreen.halfPageUp", halfPage],
+			["tui.altScreen.halfPageDown", -halfPage],
+			["tui.altScreen.lineUp", 1],
+			["tui.altScreen.lineDown", -1],
+			["tui.altScreen.top", Infinity],
+			["tui.altScreen.bottom", -Infinity],
+		] as const) {
+			if (this.keybindings.matches(data, action)) {
+				this.scrollBy(lines);
+				return;
+			}
 		}
 		this.editor.handleInput(data);
 		this.tui.requestRender();
@@ -255,36 +264,47 @@ export class AgentView implements Component, Focusable {
 		const travel = rail.height - rail.thumbHeight;
 		if (travel <= 0 || rail.maxScroll <= 0) return;
 		const offset = Math.max(0, Math.min(travel, y - rail.y - Math.min(grabOffset, rail.thumbHeight - 1)));
-		// The view stores distance from the bottom; the rail measures from top.
-		this.scroll = rail.maxScroll - Math.round((offset / travel) * rail.maxScroll);
+		this.setScrollTop(Math.round((offset / travel) * rail.maxScroll));
 		this.tui.requestRender();
 	}
 
 	render(width: number): string[] {
-		const rows = Math.max(8, this.tui.terminal.rows);
-		const header = this.renderHeader(width);
-		const editorLines = this.editor.render(width);
-		// pi's own footer lines for this agent, then this view's key line last.
-		const footerLines = this.footer.render(width);
-		this.viewport = Math.max(3, rows - header.length - editorLines.length - footerLines.length - 1);
+		const rows = Math.max(1, this.tui.terminal.rows);
+		const controls = rows > 1 ? [this.renderControls(width)] : [];
+		let editorLines = this.editor.render(width);
+		const editorBudget = rows - controls.length;
+		if (editorLines.length > editorBudget) {
+			// The native editor has a five-row minimum viewport. Keep its cursor
+			// visible even when this overlay has less room, dropping borders first.
+			const cursor = editorLines.findIndex((line) => line.includes(CURSOR_MARKER));
+			const start = Math.max(0, Math.min(cursor - Math.floor(editorBudget / 2), editorLines.length - editorBudget));
+			editorLines = editorLines.slice(start, start + editorBudget);
+		}
+		let remaining = rows - editorLines.length - controls.length;
+		// Preserve the editor and controls before spending rows on metadata.
+		const footerLines = this.footer.render(width).slice(0, remaining);
+		remaining -= footerLines.length;
+		const header = this.renderHeader(width).slice(0, remaining);
+		this.viewport = remaining - header.length;
 
 		// This overlay renders its own bounded viewport rather than exposing
 		// a ScrollView layout node. Reserve one column for a visible scroll rail.
 		const contentWidth = Math.max(1, width - 1);
-		const body = [...this.transcriptLines(contentWidth), ...this.streamingLines(contentWidth)];
+		// Child renderers own their caches and can invalidate independently of
+		// this view. Never cache their flattened lines solely by width.
+		const body = [...this.transcript.render(contentWidth), ...this.streamingLines(contentWidth)];
 		const maxScroll = Math.max(0, body.length - this.viewport);
-		this.scroll = Math.min(this.scroll, maxScroll);
-		const end = body.length - this.scroll;
-		const visible = body.slice(Math.max(0, end - this.viewport), end);
+		this.maxScroll = maxScroll;
+		this.setScrollTop(this.scrollTop ?? maxScroll);
+		const top = this.scrollTop ?? maxScroll;
+		const visible = body.slice(top, top + this.viewport);
 		while (visible.length < this.viewport) visible.unshift("");
-		if (width > 1) {
-			const thumbHeight = Math.max(
-				2,
-				Math.min(this.viewport, Math.round(this.viewport ** 2 / Math.max(1, body.length))),
+		if (width > 1 && this.viewport > 0) {
+			const thumbHeight = Math.min(
+				this.viewport,
+				Math.max(2, Math.round(this.viewport ** 2 / Math.max(1, body.length))),
 			);
-			const thumbTop = maxScroll
-				? Math.round(((maxScroll - this.scroll) / maxScroll) * (this.viewport - thumbHeight))
-				: 0;
+			const thumbTop = maxScroll ? Math.round((top / maxScroll) * (this.viewport - thumbHeight)) : 0;
 			if (
 				this.scrollbar?.x !== width - 1 ||
 				this.scrollbar.y !== header.length ||
@@ -309,10 +329,8 @@ export class AgentView implements Component, Focusable {
 			this.dragGrabOffset = undefined;
 			this.scrollbarHovered = false;
 		}
-		const controls = this.renderControls(width);
-
 		// Pad every line to the full width: the overlay must cover the main view.
-		return [...header, ...visible, ...editorLines, ...footerLines, controls].map((line) =>
+		return [...header, ...visible, ...editorLines, ...footerLines, ...controls].map((line) =>
 			truncateToWidth(line, width, "", true),
 		);
 	}
@@ -376,7 +394,6 @@ export class AgentView implements Component, Focusable {
 		});
 		this.transcript.dispose();
 		this.transcript = transcript;
-		this.transcriptCache = undefined;
 		this.tui.requestRender();
 	}
 
@@ -463,7 +480,7 @@ export class AgentView implements Component, Focusable {
 				: after?.status === "running" && entry?.status === "running"
 					? "Queued — delivered when the current turn ends"
 					: "";
-		this.scroll = 0;
+		this.scrollTop = undefined;
 		this.attach();
 		this.tui.requestRender();
 	}
@@ -503,17 +520,15 @@ export class AgentView implements Component, Focusable {
 		}
 	}
 
-	private scrollBy(lines: number): void {
-		this.scroll = Math.max(0, this.scroll + lines);
-		this.resetSelection(); // the text under it moves
-		this.tui.requestRender();
+	private setScrollTop(top: number): void {
+		const clamped = Math.max(0, Math.min(top, this.maxScroll));
+		this.scrollTop = clamped === this.maxScroll ? undefined : clamped;
 	}
 
-	private transcriptLines(width: number): string[] {
-		if (this.transcriptCache?.width !== width) {
-			this.transcriptCache = { width, lines: this.transcript.render(width) };
-		}
-		return this.transcriptCache.lines;
+	private scrollBy(lines: number): void {
+		this.setScrollTop((this.scrollTop ?? this.maxScroll) - lines);
+		this.resetSelection(); // the text under it moves
+		this.tui.requestRender();
 	}
 
 	private streamingLines(width: number): string[] {
@@ -568,7 +583,11 @@ export class AgentView implements Component, Focusable {
 		const entry = this.deps.entry();
 		const finished = entry ? isTerminal(entry.status) : true;
 		const hint = finished ? "Finished — send a message to resume · " : "";
-		const keys = `/continue Report to parent · Enter Side chat · ${this.deps.canStop?.() ? "Ctrl+X Stop · " : ""}PgUp/PgDn Scroll · Esc Back`;
+		const scrollKeys = [
+			...this.keybindings.getKeys("tui.altScreen.pageUp"),
+			...this.keybindings.getKeys("tui.altScreen.pageDown"),
+		].join("/");
+		const keys = `/continue Report to parent · Enter Side chat · ${this.deps.canStop?.() ? "Ctrl+X Stop · " : ""}${scrollKeys ? `${scrollKeys} Scroll · ` : ""}Esc Back`;
 		const notice = this.notice ? `${this.notice} · ` : "";
 		return truncateToWidth(t.fg("dim", `${notice}${hint}${keys}`), width, "…");
 	}

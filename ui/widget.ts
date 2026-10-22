@@ -14,7 +14,7 @@ import type { ExtensionUIContext, Theme } from "@earendil-works/pi-coding-agent"
 import { styleRow as cardStyleRow, type StyledRow } from "./card.js";
 import { formatDuration, SPINNER_TICK_MS, Spinner } from "./spinner.js";
 import { type TickerHandle, ticker } from "./ticker.js";
-import { structRow } from "./width.js";
+import { capPlain, structRow } from "./width.js";
 
 const WIDGET_KEY = "pi-ui-status";
 // 3 columns: ` ⠋ ` — content aligns with the @name title start (1 + glyph 1 + space).
@@ -342,8 +342,8 @@ export class StatusWidget {
 				return {
 					render: (width: number) => this.render(theme, width),
 					invalidate: () => {
-						this.registered = false;
-						this.tui = undefined;
+						// No render cache to clear; the host controls redraws. Keep
+						// registration and the render handle until dispose().
 					},
 				} satisfies WidgetRender;
 			},
@@ -352,13 +352,16 @@ export class StatusWidget {
 		this.registered = true;
 	}
 
-	private render(theme: Theme, width?: number): string[] {
+	private render(theme: Theme, width = 80): string[] {
 		const lines: string[] = [];
 		if (this.title) {
 			// One marker line: ` ● <Title>` — 1-char left padding (matching the
 			// agent rows), accent dot + bold title color.
 			lines.push(
-				` ${theme.fg("accent", "\u25cf")} ${theme.fg("toolTitle", theme.bold(this.title))}${this.metaLine(theme)}`,
+				capPlain(
+					` ${theme.fg("accent", "\u25cf")} ${theme.fg("toolTitle", theme.bold(this.title))}${this.metaLine(theme)}`,
+					width,
+				),
 			);
 		}
 		const rows = [...this.rows.values()];
@@ -380,7 +383,7 @@ export class StatusWidget {
 			if (restRunning) restParts.push(`${restRunning} running`);
 			if (restFailed) restParts.push(theme.fg("error", `${restFailed} failed`));
 			if (restIdle) restParts.push(`${restIdle} idle`);
-			lines.push(` ${theme.fg("muted", `\u2026 ${restParts.join(" · ")}`)}`);
+			lines.push(capPlain(` ${theme.fg("muted", `\u2026 ${restParts.join(" · ")}`)}`, width));
 		} else {
 			for (const row of rows) {
 				lines.push(...renderWidgetItemLine(row.item, theme, row.spinner, width));

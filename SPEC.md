@@ -30,7 +30,7 @@ Provide mechanisms for callers to compose, not a workflow engine. Do not hard-co
 - Place status icons first and retain the card wrapper through pending, success, and failure.
 - Separate metadata with `·`; time belongs in header metadata, paths in the footer. Align body content to the card's left edge, with blank lines between sections.
 - Collapsed output uses a preview and expansion hint; expanded output retains the complete rendering source. Cap model-facing text at bash's output limits, not the UI source.
-- In fullscreen mode, left-clicking a completion notification or question card toggles only that message. Local folding survives renderer invalidation; Ctrl+O remains the global expand/collapse control. Regular mode uses Ctrl+O.
+- In fullscreen mode, left-clicking a tool, completion notification, or question card toggles only that card. Local folding survives renderer invalidation; Ctrl+O remains the global expand/collapse control. Regular mode uses Ctrl+O. Handle the primary-button press as well as the click so Pi 1.4 routes the click directly to the component instead of relying on its text-selection fallback. Presses do not activate actions, and drags do not toggle cards or open agents.
 - Missing output uses a dim parenthesized placeholder. Show meaningful activity as execution changes state; long silence without feedback is a defect. Use `working…` only when no more specific operation is available.
 - Development previews must reflect actual behavior. Do not add third-party UI libraries.
 - Use `StringEnum` for parameter enums for Gemini compatibility. For blank lines, use `Text("\n" + content)`, not `Text("")`. Never call `context.invalidate()` synchronously from a render function.
@@ -166,7 +166,8 @@ session: /path/to/session.jsonl
 - Each row shows the agent's ID, task label, elapsed time or status, and latest activity while active. Persistent completion changes the row to idle (`‖`); terminal entries remain available for review and revival.
 - When rows exceed the display budget, prioritize live agents, then the most recently finished, preserving spawn order. The hint shows the number of hidden entries and `/agents`.
 - Clicking a row or invoking `/agents` opens the native agent view. An empty roster hides the list. Resume and reload reconstruct it from the current session branch.
-- Layout uses the terminal width supplied to rendering and pi's visible-width helpers.
+- Layout uses the terminal width supplied to rendering and pi's visible-width helpers, including zero-width budgets. Render invalidation does not unregister an installed widget; disposal removes it.
+- The agent view honors configured fullscreen scrolling actions and the actual terminal height. Keep the editor visible in short terminals, allow the body viewport to shrink to zero, and preserve the reading position while scrolled away from the bottom. Following the bottom remains automatic. Child renderer invalidation must update the visible transcript at the same width.
 
 ## Implementation decisions
 

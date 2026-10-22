@@ -18,6 +18,7 @@ import {
 	type Theme,
 	type ToolRenderResultOptions,
 } from "@earendil-works/pi-coding-agent";
+import { Container, MouseRegion } from "@earendil-works/pi-tui";
 import {
 	type CardField,
 	type Component,
@@ -27,6 +28,7 @@ import {
 	type StyledRow,
 	textLine,
 } from "./card.js";
+import { primaryClick } from "./mouse.js";
 import { SPINNER_TICK_MS, Spinner } from "./spinner.js";
 import { ticker } from "./ticker.js";
 
@@ -172,6 +174,34 @@ function stopAnimation(st: Record<string, unknown> | undefined): void {
 	handle.unsubscribe();
 }
 
+/** Local tool folding survives host rebuilds, while Ctrl+O overrides it. */
+const toolFolds = new WeakMap<object, { hostExpanded: boolean; expanded: boolean }>();
+
+function foldableToolCard(rc: RenderContext, build: (expanded: boolean) => Component): Component {
+	const key = rc.state ?? rc;
+	let fold = toolFolds.get(key);
+	if (!fold || fold.hostExpanded !== rc.expanded) {
+		fold = { hostExpanded: rc.expanded, expanded: rc.expanded };
+		toolFolds.set(key, fold);
+	}
+	const state = fold;
+	const content = new Container();
+	const rebuild = () => {
+		content.clear();
+		content.addChild(build(state.expanded));
+	};
+	rebuild();
+	// The host's click-only MouseRegion leaves presses to text selection.
+	// Own both phases so Pi 1.4 routes the click directly to this card.
+	return new MouseRegion(content, (event) =>
+		primaryClick(event, () => {
+			state.expanded = !state.expanded;
+			rebuild();
+			rc.invalidate();
+		}),
+	);
+}
+
 // ── body rendering (templates → text; folding is the card's job) ─
 
 function bodyRows<Args, Data>(
@@ -261,8 +291,8 @@ export function createToolView<Args, Data>(
 		);
 	};
 
-	return {
-		renderCall(args, theme, context) {
+	const renderers = {
+		renderCall(args: Args, theme: Theme, context: unknown) {
 			const rc = context as RenderContext;
 			const status = statusForCall(rc);
 			if (status === "processing") {
@@ -303,7 +333,12 @@ export function createToolView<Args, Data>(
 			stopAnimation(rc.state as Record<string, unknown> | undefined);
 			return textLine("");
 		},
-		renderResult(result: AgentToolResult<Record<string, unknown>>, options, theme, context) {
+		renderResult(
+			result: AgentToolResult<Record<string, unknown>>,
+			options: ToolRenderResultOptions,
+			theme: Theme,
+			context: unknown,
+		) {
 			const rc = context as RenderContext;
 			const status = statusForResult(result, rc);
 			const details = (result.details ?? {}) as Partial<ViewResultData>;
@@ -342,6 +377,20 @@ export function createToolView<Args, Data>(
 				options.expanded,
 				spinnerFor(rc.state),
 				theme,
+			);
+		},
+	};
+	return {
+		renderCall(args, theme, context) {
+			// These renderers never reuse lastComponent. Do not retain it in a
+			// click callback: each redraw would otherwise retain its predecessor.
+			const rc = { ...(context as RenderContext), lastComponent: undefined };
+			return foldableToolCard(rc, (expanded) => renderers.renderCall(args, theme, { ...rc, expanded }));
+		},
+		renderResult(result, options, theme, context) {
+			const rc = { ...(context as RenderContext), lastComponent: undefined };
+			return foldableToolCard({ ...rc, expanded: options.expanded }, (expanded) =>
+				renderers.renderResult(result, { ...options, expanded }, theme, { ...rc, expanded }),
 			);
 		},
 	};

@@ -385,6 +385,7 @@ export function dataCard(config: DataCardConfig, theme: Theme, spinner?: Spinner
 }
 
 function dataCardConfig(config: DataCardConfig, theme: Theme, spinner?: Spinner): CardConfig {
+	const rows = Array.isArray(config.body) ? config.body : [];
 	return {
 		header: config.bare
 			? undefined
@@ -411,10 +412,10 @@ function dataCardConfig(config: DataCardConfig, theme: Theme, spinner?: Spinner)
 							}
 						: { message: config.body, error: config.error }
 					: {
-							extra: (config.body as StyledRow[]).length
+							extra: rows.length
 								? [
 										(config.preview === "head" ? foldedBlockHead : foldedBlock)(
-											(config.body as StyledRow[]).map((r) => styleRow(r, theme)),
+											rows.map((r) => styleRow(r, theme)),
 											theme,
 											config.expanded,
 										),

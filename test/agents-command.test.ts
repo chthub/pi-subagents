@@ -6,7 +6,7 @@ import {
 	initTheme,
 	SessionManager,
 } from "@earendil-works/pi-coding-agent";
-import { type Component, stripTerminalSequences } from "@earendil-works/pi-tui";
+import { type Component, KeybindingsManager, stripTerminalSequences, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import extension from "../index.js";
 import { ROSTER_STATE_TYPE } from "../roster-state.js";
 
@@ -40,7 +40,7 @@ test("agent selector keeps same-named nested entries distinct and opens the sele
 			const view = factory(
 				{ terminal: { rows: 40 }, requestRender() {} } as never,
 				{ fg: (_key: string, text: string) => text, bold: (text: string) => text } as never,
-				{ matches: () => false } as never,
+				new KeybindingsManager(TUI_KEYBINDINGS) as never,
 				(() => {}) as never,
 			);
 			opened = stripTerminalSequences(view.render(120)[0]);

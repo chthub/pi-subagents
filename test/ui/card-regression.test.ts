@@ -67,6 +67,19 @@ test("a narrow spawn update does not crash Pi's real main-screen renderer", () =
 	}
 });
 
+test("error-only cards render without a body in every preview mode", () => {
+	for (const expanded of [false, true]) {
+		for (const preview of ["head", "tail"] as const) {
+			for (const body of [undefined, [], ""]) {
+				const card = dataCard({ name: "probe", status: "error", error: "failure", body, preview, expanded }, theme);
+				const text = plain(card.render(40));
+				assert.match(text, /✗ probe/);
+				assert.match(text, /failure/);
+			}
+		}
+	}
+});
+
 test("same-sized result bodies with identical edges never share a preview", () => {
 	const prefix = "same beginning ".repeat(3);
 	const suffix = "same ending ".repeat(4);

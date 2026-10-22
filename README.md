@@ -6,7 +6,7 @@
 
 Three operations — spawn, send, stop — backed by isolated contexts, parallel execution, automatic results, resumable sessions, and a native agent view. Complete lifecycle, minimal interface: you define the work; the framework handles the agents.
 
-Built as a pi extension, with no additional runtime dependencies beyond pi's host-provided packages. Tested against pi 1.1.0.
+Built as a pi extension, with no additional runtime dependencies beyond pi's host-provided packages. Tested against pi 1.4.0.
 
 ```
 You:  Research this project's database schema for me
@@ -118,7 +118,7 @@ Below the editor, one line per sub-agent of this conversation — running, idle,
 - **Hover** highlights the line under the pointer. pi turns off pointer-motion reports inside tmux, zellij and screen, so there is no hover highlight there; clicks still work.
 - **The bottom of the view is pi's own footer for that agent**: working directory and git branch, its token usage, cost and context use, its model and thinking level, and the statuses its extensions set. The view's own keys sit on the last line below it.
 - **Ctrl+X twice** stops a live agent (the first press asks for confirmation; any other key cancels). Its saved session stays, so a later message revives it. If the main agent is still waiting on that agent's turn, it gets a `stopped` result saying the user stopped it.
-- **Esc** returns to the main conversation. PgUp/PgDn or the mouse wheel scroll; drag the right-hand scrollbar thumb or click its track to jump (fullscreen mouse input required). Dragging to the bottom follows new output again. The thumb widens from `┃` to `█` on hover or while dragging, without rewrapping the conversation; hover requires terminal pointer-motion reporting. Drag over the text to select it (double-click a word, triple-click a line); pi copies it on release, as in the main conversation. ctrl+o expands tool output.
+- **Esc** returns to the main conversation. The configured fullscreen scrolling shortcuts (PgUp/PgDn by default) or the mouse wheel scroll; drag the right-hand scrollbar thumb or click its track to jump (fullscreen mouse input required). Reading above the bottom keeps your position as new output arrives; returning to the bottom follows new output again. The thumb widens from `┃` to `█` on hover or while dragging, without rewrapping the conversation; hover requires terminal pointer-motion reporting. Drag over the text to select it (double-click a word, triple-click a line); pi copies it on release, as in the main conversation. ctrl+o expands tool output.
 - The list is rebuilt from the transcript on resume or `/reload` (processes don't survive those; their sessions do). `/new`, `/resume` and `/fork` stop the current conversation's sub-agents too.
 
 ## Configuration

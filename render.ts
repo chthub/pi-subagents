@@ -23,6 +23,7 @@ import {
 	stoppedIcon,
 	successIcon,
 } from "./ui/card.js";
+import { primaryClick } from "./ui/mouse.js";
 import { formatDuration } from "./ui/spinner.js";
 
 // Pi rebuilds custom renderers on invalidation, but does not give them an
@@ -39,17 +40,29 @@ function renderNotificationCard(message: object, config: CardConfig, theme: Them
 	}
 	const state = fold;
 	const content = new Container();
+	let renderedExpanded = state.expanded;
 	const rebuild = () => {
+		renderedExpanded = state.expanded;
 		content.clear();
 		content.addChild(cardShell(theme, "customMessageBg", renderCardUi({ ...config, expanded: state.expanded }, theme)));
 	};
 	rebuild();
-	return new MouseRegion(content, (event) => {
-		if (event.type !== "click" || event.button !== "left") return;
-		state.expanded = !state.expanded;
-		rebuild();
-		return { handled: true, render: true };
-	});
+	const card: Component = {
+		render(width) {
+			// A captured press can outlive a host rebuild. All renderers for
+			// this message must observe the shared fold when the click arrives.
+			if (renderedExpanded !== state.expanded) rebuild();
+			return content.render(width);
+		},
+		invalidate: () => content.invalidate(),
+		handleMouse: (event) => content.handleMouse(event),
+	};
+	return new MouseRegion(card, (event) =>
+		primaryClick(event, () => {
+			state.expanded = !state.expanded;
+			rebuild();
+		}),
+	);
 }
 
 /** Missing details: a dim one-liner inside the same custom-message shell. */

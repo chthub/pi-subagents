@@ -190,13 +190,14 @@ for (const status of ["completed", "failed", "stopped"] as const) {
 
 		for (const event of [
 			{ type: "click", button: "right" },
-			{ type: "press", button: "left" },
 			{ type: "drag", button: "left" },
 			{ type: "wheel", button: "none", wheelDelta: -1 },
 		] as const) {
 			assert.equal(mouse(card, event), undefined);
 			assert.equal(renderText(card, 120), collapsed);
 		}
+		assert.deepEqual(mouse(card, { type: "press" }), { handled: true, render: false });
+		assert.equal(renderText(card, 120), collapsed, "press arms the click without toggling");
 		assert.equal(mouse(card)?.handled, true);
 		assert.ok(renderText(card, 120).includes(longReply));
 		assert.ok(renderText(other, 120).includes("to expand"));
@@ -217,6 +218,49 @@ test("question cards are individually clickable", () => {
 	assert.ok(renderText(card, 120).includes(longReply));
 	mouse(card);
 	assert.equal(renderText(card, 120), collapsed);
+});
+
+test("a notification press remains usable when the host rebuilds before release", () => {
+	const message = {
+		role: "custom" as const,
+		customType: "subagent-notification",
+		content: "model payload",
+		display: true,
+		timestamp: 0,
+		details: { status: "completed" as const, agent_id: "zoe", label: "schema", result: longReply },
+	};
+	const host = new CustomMessageComponent(message, (m, options, t) =>
+		renderNotification(m as typeof message, options, t),
+	);
+	const event: TuiMouseEvent = {
+		type: "press",
+		button: "left",
+		x: 2,
+		y: 3,
+		screenX: 2,
+		screenY: 3,
+		width: 120,
+		height: host.render(120).length,
+		shift: false,
+		alt: false,
+		ctrl: false,
+	};
+	const pressed = host.handleMouse(event);
+	assert.ok(pressed);
+	host.invalidate();
+	const target = pressed.target;
+	target.component.handleMouse?.({
+		...event,
+		type: "click",
+		x: event.screenX - target.originX,
+		y: event.screenY - target.originY,
+		width: target.width,
+		height: target.height,
+	});
+	assert.ok(
+		renderText(host, 120).includes(longReply),
+		"the current renderer observes the captured target's fold change",
+	);
 });
 
 test("Pi custom-message rebuilds preserve local folding; global expansion overrides it", () => {

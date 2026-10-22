@@ -86,6 +86,7 @@ function capture() {
 	return {
 		ui,
 		lines: (width = 100) => component?.render(width) ?? [],
+		press: (y: number) => component?.handleMouse?.({ type: "press", button: "left", y }),
 		click: (y: number) => component?.handleMouse?.({ type: "click", button: "left", y }),
 		/** Pointer motion over line `y` of a list whose top sits on screen row `top` (0-based). */
 		move: (y: number, top = 30) => component?.handleMouse?.({ type: "move", button: "none", y, screenY: top + y }),
@@ -169,9 +170,29 @@ describe("AgentWidget — the bottom agent list", () => {
 		w.add(agentRow("jude", "one"));
 		w.add(agentRow("max", "two"));
 		lines(); // a render maps lines to agents
-		assert.deepEqual(click(1), { handled: true });
+		assert.deepEqual(click(1), { handled: true, render: true });
 		assert.equal(click(2), undefined);
 		assert.deepEqual(opened, ["max"]);
+		w.dispose();
+	});
+
+	it("does not open a replacement row when the visible roster changes during a click", () => {
+		const { ui, lines, press, click } = capture();
+		const roster = new Roster();
+		for (const [index, id] of [..."abcdefgh"].entries()) {
+			roster.upsert({ agentId: id, label: id, status: "done", endedAt: index });
+		}
+		const opened: string[] = [];
+		const w = new AgentWidget(ui, roster, (id) => opened.push(id));
+		assert.match(lines()[0], /@a/);
+		press(0);
+		roster.upsert({ agentId: "i", label: "new live task", status: "running" });
+		assert.match(lines()[0], /@b/);
+		click(0);
+		assert.deepEqual(opened, [], "a row change must not redirect the pending click");
+		press(0);
+		click(0);
+		assert.deepEqual(opened, ["b"]);
 		w.dispose();
 	});
 

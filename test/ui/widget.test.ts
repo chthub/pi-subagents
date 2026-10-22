@@ -17,18 +17,18 @@ import {
 } from "../../ui/widget.js";
 
 /** Captures the widget's render function through a mock ui.setWidget. */
-function capture(ui: { setWidget: ExtensionUIContext["setWidget"] }) {
+function capture(ui: { setWidget: ExtensionUIContext["setWidget"] }, widgetTheme = theme) {
 	let render: ((width?: number) => string[]) | undefined;
 	ui.setWidget = (_key, widget) => {
 		render =
 			typeof widget === "function"
 				? (widget as unknown as (tui: unknown, th: unknown) => { render(width?: number): string[] })(
 						{ requestRender: () => {} },
-						theme,
+						widgetTheme,
 					).render
 				: undefined;
 	};
-	return () => render?.() ?? [];
+	return (width?: number) => render?.(width) ?? [];
 }
 
 const theme = {
@@ -105,7 +105,8 @@ describe("StatusWidget progress meta", () => {
 		w.add(item("c"));
 		w.remove("a", "failed");
 		w.remove("b", "stopped");
-		const title = lines().find((l) => l.includes("Agents"));
+		// This theme mock spells out color names as visible text.
+		const title = lines(120).find((l) => l.includes("Agents"));
 		assert.ok(title);
 		assert.match(title, /muted:\(done 0\/3 · 1 running · error:1 failed · 1 stopped\)/);
 		w.dispose();
@@ -252,6 +253,54 @@ describe("StatusWidget — idle rows (persistent agents)", () => {
 		w.dispose();
 	});
 
+	it("invalidate keeps an idle widget registered and dispose unregisters it exactly once", () => {
+		let component: { render(width: number): string[]; invalidate(): void } | undefined;
+		let renders = 0;
+		const calls: { key: string; content: unknown }[] = [];
+		const ui: Pick<ExtensionUIContext, "setWidget"> = {
+			setWidget: (key, content) => {
+				calls.push({ key, content });
+				component =
+					typeof content === "function" ? content({ requestRender: () => renders++ } as never, theme) : undefined;
+			},
+		};
+		const w = new StatusWidget(ui as ExtensionUIContext, "Agents");
+		w.add({ id: "a", title: "stay", startedAt: 0, status: "idle" });
+		assert.ok(component);
+		const before = component.render(80);
+		component.invalidate();
+		assert.deepEqual(component.render(80), before, "invalidation preserves the idle row");
+		assert.equal(calls.length, 1, "invalidation does not re-register or unregister");
+		const afterInvalidation = renders;
+		w.updateRows("a", [{ style: "text", content: "updated" }]);
+		assert.ok(renders > afterInvalidation, "event-driven redraw retains the injected TUI handle");
+		assert.ok(component.render(80).some((line) => line.includes("updated")));
+		assert.equal(calls.length, 1, "updates reuse the existing registration");
+		w.dispose();
+		assert.equal(calls.length, 2);
+		assert.deepEqual(calls[1], { key: calls[0].key, content: undefined });
+		w.dispose();
+		assert.equal(calls.length, 2, "repeated dispose is idempotent");
+	});
+
+	it("idle widget invalidation followed immediately by dispose removes the registration", () => {
+		let component: { invalidate(): void } | undefined;
+		let registered = false;
+		const ui: Pick<ExtensionUIContext, "setWidget"> = {
+			setWidget: (_key, content) => {
+				registered = typeof content === "function";
+				component = typeof content === "function" ? content({ requestRender: () => {} } as never, theme) : undefined;
+			},
+		};
+		const w = new StatusWidget(ui as ExtensionUIContext);
+		w.add({ id: "a", title: "stay", startedAt: 0, status: "idle" });
+		assert.ok(component);
+		component.invalidate();
+		assert.equal(registered, true);
+		w.dispose();
+		assert.equal(registered, false);
+	});
+
 	it("idle-only rows stop the animation clock — zero periodic redraws (pi-bash parity)", async () => {
 		let renders = 0;
 		let widgetFactory: unknown;
@@ -370,6 +419,58 @@ describe("StatusWidget — width-aware activity clipping (no over-wide regressio
 			{ style: "text", content: "\ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67".repeat(200) },
 		]);
 		assert.ok(visibleWidth(zwj) <= 30, `ZWJ width ${visibleWidth(zwj)} > 30`);
+	});
+
+	it("bounds every item line at narrow widths with long metadata and nesting prefixes", () => {
+		for (const status of ["running", "idle", "done", "failed", "stopped"] as const) {
+			for (const indent of [0, 1, 10]) {
+				for (const width of [0, 1, 2, 3, 4, 5, 8, 20]) {
+					const lines = renderWidgetItemLine(
+						{
+							id: "a",
+							title: "\u8c03\u7814👨‍👩‍👧".repeat(20),
+							startedAt: Date.now() - 5_000,
+							status,
+							indent,
+							rows: [
+								{ style: "thinking", content: "\u8c03\u7814".repeat(20) },
+								{ style: "tool", content: "👨‍👩‍👧".repeat(20) },
+								{ style: "text", content: "abc".repeat(20) },
+							],
+						},
+						wtheme,
+						new Spinner(),
+						width,
+					);
+					assert.equal(lines.length, 4);
+					for (const line of lines) {
+						assert.ok(
+							visibleWidth(line) <= width,
+							`${status}, indent ${indent}: width ${visibleWidth(line)} > ${width}`,
+						);
+					}
+				}
+			}
+		}
+	});
+
+	it("also bounds the widget title, progress metadata and folded counter", () => {
+		const ui = { setWidget: () => {} } as never;
+		const w = new StatusWidget(ui as ExtensionUIContext, "\u8c03\u7814👨‍👩‍👧".repeat(40), 1);
+		const lines = capture(ui, wtheme);
+		try {
+			w.add({ id: "a", title: "stay", startedAt: 0, status: "idle" });
+			w.add({ id: "b", title: "also stay", startedAt: 0, status: "idle" });
+			for (const width of [0, 1, 2, 4, 10, 40, 80]) {
+				const out = lines(width);
+				assert.equal(out.length, 3, "title, item and folded counter");
+				for (const line of out) {
+					assert.ok(visibleWidth(line) <= width, `width ${visibleWidth(line)} > ${width}`);
+				}
+			}
+		} finally {
+			w.dispose();
+		}
 	});
 
 	it("defaults to 80 cols when no width is passed", () => {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { capPlain, structRow } from "../../ui/width.js";
+import { capPlain, clipTail, safeTitle, structRow } from "../../ui/width.js";
 
 describe("capPlain", () => {
 	it("keeps short text as-is", () => {
@@ -16,6 +16,43 @@ describe("capPlain", () => {
 		const out = capPlain("\u8c03".repeat(30), 20);
 		assert.ok(visibleWidth(out) <= 20);
 		assert.ok(out.endsWith("\u2026"));
+	});
+});
+
+describe("head/tail width budgets", () => {
+	for (const [name, clip] of [
+		["capPlain", capPlain],
+		["clipTail", clipTail],
+		["safeTitle", safeTitle],
+	] as const) {
+		it(`${name} returns nothing for a zero-column budget`, () => {
+			assert.equal(clip("abc", 0), "");
+			assert.equal(clip("", 0), "");
+		});
+
+		it(`${name} respects small budgets with CJK, emoji and combining marks`, () => {
+			for (const text of [
+				"abc",
+				"\u8c03\u7814".repeat(10),
+				"👨‍👩‍👧".repeat(10),
+				"🇨🇳".repeat(10),
+				"e\u0301".repeat(10),
+			]) {
+				for (let width = 0; width <= 12; width++) {
+					const out = clip(text, width);
+					assert.ok(visibleWidth(out) <= width, `${name}(${JSON.stringify(text)}, ${width}): ${JSON.stringify(out)}`);
+				}
+			}
+			assert.equal(clip("abc", 1), "…");
+		});
+	}
+
+	it("preserves complete graphemes at either clipping boundary", () => {
+		for (const grapheme of ["👨‍👩‍👧", "🇨🇳", "e\u0301"]) {
+			const width = visibleWidth(grapheme) + 1;
+			assert.equal(capPlain(grapheme.repeat(5), width), `${grapheme}…`);
+			assert.equal(clipTail(grapheme.repeat(5), width), `…${grapheme}`);
+		}
 	});
 });
 
@@ -57,7 +94,36 @@ describe("structRow", () => {
 	});
 
 	it("degenerate width still emits a safe line", () => {
-		const out = structRow({ prefix: "   ", content: "y".repeat(50), width: 2 });
-		assert.ok(visibleWidth(out) <= 3 + 2);
+		for (const suffix of [undefined, " (5s)"]) {
+			const out = structRow({ prefix: "   ", content: "abc", suffix, width: 2 });
+			assert.ok(visibleWidth(out) <= 2);
+		}
+	});
+
+	it("budgets long styled prefixes and suffixes, even at zero/one column", () => {
+		for (const prefix of ["", "   ", styled("prefix ".repeat(10)), styled("\u8c03👨‍👩‍👧")]) {
+			for (const suffix of ["", " (5s)", styled("suffix ".repeat(10)), styled("🇨🇳\u8c03")]) {
+				for (const keep of ["head", "tail"] as const) {
+					for (let width = 0; width <= 20; width++) {
+						const out = structRow({
+							prefix,
+							content: "\u8c03👨‍👩‍👧abc".repeat(10),
+							suffix,
+							width,
+							keep,
+							styleContent: styled,
+						});
+						assert.ok(visibleWidth(out) <= width, `width ${visibleWidth(out)} > ${width}: ${JSON.stringify(out)}`);
+					}
+				}
+			}
+		}
+	});
+
+	it("keeps metadata when only the structural text fits", () => {
+		assert.equal(structRow({ prefix: "   ", content: "abc", suffix: " (5s)", width: 5 }), " (5s)");
+		const out = structRow({ prefix: "   ", content: "abc", suffix: " (5s)", width: 7 });
+		assert.equal(visibleWidth(out), 7);
+		assert.ok(out.endsWith(" (5s)"));
 	});
 });

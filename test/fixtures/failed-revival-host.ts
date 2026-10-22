@@ -10,7 +10,7 @@ import {
 	SessionManager,
 	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import { stripTerminalSequences } from "@earendil-works/pi-tui";
+import { KeybindingsManager, stripTerminalSequences, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import type { AgentView } from "../../agent-view.js";
 import { CHILD_LAUNCH_EVENT, type ChildLaunch } from "../../child-launch.js";
 import extension from "../../index.js";
@@ -87,7 +87,7 @@ const ui = {
 			view = factory(
 				{ terminal: { rows: 40 }, requestRender() {} } as never,
 				{ fg: (_key: string, text: string) => text, bold: (text: string) => text } as never,
-				{ matches: () => false } as never,
+				new KeybindingsManager(TUI_KEYBINDINGS) as never,
 				resolve as never,
 			);
 		});
